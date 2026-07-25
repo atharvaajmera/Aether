@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from "react";
-import { File, RefreshCcw, Monitor, Wifi, Globe } from "lucide-react";
+import React, { useState, useEffect, useRef } from "react";
+import { File, RefreshCcw, Monitor, Wifi, Globe, CheckCircle2 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { PlenumEvent, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, IceServer } from "../types/rust";
+import { PlenumEvent, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, TransferEvent, IceServer } from "../types/rust";
+import { addHistoryEntry } from "../services/history";
+import { formatBytes, formatDuration } from "../utils/format";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
 const STATE_LABELS: Record<string, string> = {
@@ -29,6 +31,12 @@ const SendPage: React.FC = () => {
   const [pinInput, setPinInput] = useState("");
   const [roomCodeInput, setRoomCodeInput] = useState("");
   const [isConnectingRemote, setIsConnectingRemote] = useState(false);
+  const [sendSuccess, setSendSuccess] = useState(false);
+  const [speedText, setSpeedText] = useState<string | null>(null);
+  const [etaText, setEtaText] = useState<string | null>(null);
+  // Auto-reset timer so a late Completed can't race a fresh transfer's UI.
+  const autoResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const transferStartRef = useRef<number | null>(null);
 
   const startDiscovery = async () => {
     setIsDiscovering(true);
@@ -63,19 +71,64 @@ const SendPage: React.FC = () => {
              });
            }
         } else if ("Transfer" in payload) {
-           const trans = payload.Transfer;
+           const trans: TransferEvent = payload.Transfer;
             if ("StateChanged" in trans) {
               if (trans.StateChanged.state !== "Closed") {
                 setTransferStatus(friendlyState(trans.StateChanged.state));
               }
            } else if ("Started" in trans) {
-             setTransferStatus(`Sending ${trans.Started.file_name}...`);
-             setProgress({ transferred: 0, total: trans.Started.total_bytes });
+              if (autoResetRef.current) clearTimeout(autoResetRef.current);
+              setSendSuccess(false);
+              setTransferStatus(`Sending ${trans.Started.file_name}...`);
+              setProgress({ transferred: 0, total: trans.Started.total_bytes });
+              transferStartRef.current = Date.now();
+              setSpeedText(null);
+              setEtaText(null);
            } else if ("Progress" in trans) {
-             setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
+              setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
+              if (transferStartRef.current) {
+                const elapsed = (Date.now() - transferStartRef.current) / 1000;
+                if (elapsed > 0) {
+                  const speedBps = trans.Progress.transferred_bytes / elapsed;
+                  setSpeedText(`${formatBytes(Math.round(speedBps))}/s`);
+                  const remaining = trans.Progress.total_bytes - trans.Progress.transferred_bytes;
+                  const eta = speedBps > 0 ? Math.round(remaining / speedBps) : 0;
+                  setEtaText(eta > 0 ? `${eta}s left` : "");
+                }
+              }
+           } else if ("Declined" in trans) {
+              setTransferStatus(trans.Declined.reason === "timeout" ? "Receiver did not respond" : "Receiver declined the transfer");
+              setProgress(null);
+              setSpeedText(null);
+              setEtaText(null);
+              transferStartRef.current = null;
            } else if ("Completed" in trans) {
-             setTransferStatus(`Sent ${trans.Completed.file_name} successfully!`);
-             setProgress(null);
+             const summary: TransferSummary = trans.Completed;
+             const peerLabel = summary.peer_name ?? summary.peer ?? "device";
+             addHistoryEntry({
+               direction: "send",
+               fileName: summary.file_name,
+               size: summary.total_bytes,
+               peerName: peerLabel,
+               durationMs: summary.elapsed_ms,
+               mode: summary.mode,
+               timestamp: new Date().toISOString(),
+             });
+             setSendSuccess(true);
+              setTransferStatus(
+                summary.elapsed_ms != null
+                  ? `Sent to ${peerLabel} in ${formatDuration(summary.elapsed_ms)}`
+                  : `Sent ${summary.file_name} successfully!`
+              );
+              setProgress(null);
+              setSpeedText(null);
+              setEtaText(null);
+              transferStartRef.current = null;
+             if (autoResetRef.current) clearTimeout(autoResetRef.current);
+             autoResetRef.current = setTimeout(() => {
+               setSendSuccess(false);
+               setTransferStatus("");
+             }, 4000);
            }
         }
       });
@@ -106,6 +159,7 @@ const SendPage: React.FC = () => {
 
     return () => {
       if (cleanupFn) cleanupFn();
+      if (autoResetRef.current) clearTimeout(autoResetRef.current);
     };
   }, []);
 
@@ -267,14 +321,19 @@ const SendPage: React.FC = () => {
           </div>
 
           {transferStatus && (
-            <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center" }}>
-              <div style={{ fontSize: "14px", color: "var(--text-secondary)" }}>
+            <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center", border: sendSuccess ? "1px solid var(--accent-primary)" : "none" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "14px", color: sendSuccess ? "var(--text-primary)" : "var(--text-secondary)", fontWeight: sendSuccess ? 600 : 400 }}>
+                {sendSuccess && <CheckCircle2 size={18} color="var(--accent-primary)" />}
                 {transferStatus}
               </div>
               {progress && (
                 <div style={{ marginTop: "12px", width: "100%" }}>
                   <div style={{ width: "100%", backgroundColor: "var(--bg-sidebar)", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
                     <div style={{ width: `${(progress.transferred / progress.total) * 100}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "12px", color: "var(--text-secondary)" }}>
+                    <span>{formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+                    {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
                   </div>
                 </div>
               )}
@@ -363,14 +422,19 @@ const SendPage: React.FC = () => {
         ))}
 
         {transferStatus && (
-          <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center" }}>
-            <div style={{ fontSize: "14px", color: "var(--text-secondary)" }}>
+          <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center", border: sendSuccess ? "1px solid var(--accent-primary)" : "none" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "14px", color: sendSuccess ? "var(--text-primary)" : "var(--text-secondary)", fontWeight: sendSuccess ? 600 : 400 }}>
+              {sendSuccess && <CheckCircle2 size={18} color="var(--accent-primary)" />}
               {transferStatus}
             </div>
             {progress && (
               <div style={{ marginTop: "12px", width: "100%" }}>
                 <div style={{ width: "100%", backgroundColor: "var(--bg-sidebar)", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
                   <div style={{ width: `${(progress.transferred / progress.total) * 100}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "12px", color: "var(--text-secondary)" }}>
+                  <span>{formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+                  {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
                 </div>
               </div>
             )}
