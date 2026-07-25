@@ -34,11 +34,13 @@ Stream<String> startSend({
   required String filePath,
   required String peerAddress,
   String? optionalPin,
+  String? deviceName,
 }) => RustLib.instance.api.crateApiPlenumApiStartSend(
   sessionToken: sessionToken,
   filePath: filePath,
   peerAddress: peerAddress,
   optionalPin: optionalPin,
+  deviceName: deviceName,
 );
 
 Stream<String> startReceive({
@@ -59,14 +61,6 @@ Stream<String> startReceive({
   autoAccept: autoAccept,
 );
 
-/// Sends a file over the internet via a relay/signaling server, negotiating a
-/// WebRTC data channel. Mirrors `start_send`, but for internet (non-LAN) transfers.
-///
-/// `ice_servers_json` is a JSON-encoded array of `{ urls: string[], username?:
-/// string, credential?: string }`, matching `plenum::signaling::IceServer`.
-/// Passed as JSON (rather than a plain FFI struct) because `IceServer` is
-/// defined in the `plenum` crate, so flutter_rust_bridge would otherwise
-/// generate it as an opaque handle Dart cannot construct field-by-field.
 Stream<String> startSendRemote({
   required String sessionToken,
   required String filePath,
@@ -75,6 +69,7 @@ Stream<String> startSendRemote({
   required String myPeerId,
   required String iceServersJson,
   required BigInt connectTimeoutSecs,
+  String? deviceName,
 }) => RustLib.instance.api.crateApiPlenumApiStartSendRemote(
   sessionToken: sessionToken,
   filePath: filePath,
@@ -83,6 +78,7 @@ Stream<String> startSendRemote({
   myPeerId: myPeerId,
   iceServersJson: iceServersJson,
   connectTimeoutSecs: connectTimeoutSecs,
+  deviceName: deviceName,
 );
 
 /// Receives a file over the internet via a relay/signaling server, negotiating
@@ -98,6 +94,7 @@ Stream<String> startReceiveRemote({
   required String iceServersJson,
   required BigInt connectTimeoutSecs,
   required bool autoAccept,
+  String? deviceName,
 }) => RustLib.instance.api.crateApiPlenumApiStartReceiveRemote(
   sessionToken: sessionToken,
   outputDir: outputDir,
@@ -107,14 +104,11 @@ Stream<String> startReceiveRemote({
   iceServersJson: iceServersJson,
   connectTimeoutSecs: connectTimeoutSecs,
   autoAccept: autoAccept,
+  deviceName: deviceName,
 );
 
-/// Generates a display-ready room code for internet transfers, without
-/// blocking on a relay-server connection (so the receive UI can show it
-/// immediately).
 String generateRoomCodeSync() =>
     RustLib.instance.api.crateApiPlenumApiGenerateRoomCodeSync();
 
-/// Generates a random per-connection peer id for internet transfers.
 String generatePeerIdSync() =>
     RustLib.instance.api.crateApiPlenumApiGeneratePeerIdSync();

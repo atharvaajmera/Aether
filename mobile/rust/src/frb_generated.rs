@@ -330,6 +330,7 @@ fn wire__crate__api__plenum_api__start_receive_remote_impl(
             let api_ice_servers_json = <String>::sse_decode(&mut deserializer);
             let api_connect_timeout_secs = <u64>::sse_decode(&mut deserializer);
             let api_auto_accept = <bool>::sse_decode(&mut deserializer);
+            let api_device_name = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
@@ -344,6 +345,7 @@ fn wire__crate__api__plenum_api__start_receive_remote_impl(
                             api_ice_servers_json,
                             api_connect_timeout_secs,
                             api_auto_accept,
+                            api_device_name,
                         )?;
                         Ok(output_ok)
                     })(),
@@ -382,6 +384,7 @@ fn wire__crate__api__plenum_api__start_send_impl(
             let api_file_path = <String>::sse_decode(&mut deserializer);
             let api_peer_address = <String>::sse_decode(&mut deserializer);
             let api_optional_pin = <Option<String>>::sse_decode(&mut deserializer);
+            let api_device_name = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
@@ -392,6 +395,7 @@ fn wire__crate__api__plenum_api__start_send_impl(
                             api_file_path,
                             api_peer_address,
                             api_optional_pin,
+                            api_device_name,
                         )?;
                         Ok(output_ok)
                     })(),
@@ -433,6 +437,7 @@ fn wire__crate__api__plenum_api__start_send_remote_impl(
             let api_my_peer_id = <String>::sse_decode(&mut deserializer);
             let api_ice_servers_json = <String>::sse_decode(&mut deserializer);
             let api_connect_timeout_secs = <u64>::sse_decode(&mut deserializer);
+            let api_device_name = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
@@ -446,6 +451,7 @@ fn wire__crate__api__plenum_api__start_send_remote_impl(
                             api_my_peer_id,
                             api_ice_servers_json,
                             api_connect_timeout_secs,
+                            api_device_name,
                         )?;
                         Ok(output_ok)
                     })(),

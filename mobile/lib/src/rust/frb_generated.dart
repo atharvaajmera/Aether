@@ -110,6 +110,7 @@ abstract class RustLibApi extends BaseApi {
     required String iceServersJson,
     required BigInt connectTimeoutSecs,
     required bool autoAccept,
+    String? deviceName,
   });
 
   Stream<String> crateApiPlenumApiStartSend({
@@ -117,6 +118,7 @@ abstract class RustLibApi extends BaseApi {
     required String filePath,
     required String peerAddress,
     String? optionalPin,
+    String? deviceName,
   });
 
   Stream<String> crateApiPlenumApiStartSendRemote({
@@ -127,6 +129,7 @@ abstract class RustLibApi extends BaseApi {
     required String myPeerId,
     required String iceServersJson,
     required BigInt connectTimeoutSecs,
+    String? deviceName,
   });
 }
 
@@ -376,6 +379,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String iceServersJson,
     required BigInt connectTimeoutSecs,
     required bool autoAccept,
+    String? deviceName,
   }) {
     final sink = RustStreamSink<String>();
     unawaited(
@@ -392,6 +396,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_encode_String(iceServersJson, serializer);
             sse_encode_u_64(connectTimeoutSecs, serializer);
             sse_encode_bool(autoAccept, serializer);
+            sse_encode_opt_String(deviceName, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
@@ -414,6 +419,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             iceServersJson,
             connectTimeoutSecs,
             autoAccept,
+            deviceName,
           ],
           apiImpl: this,
         ),
@@ -435,6 +441,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "iceServersJson",
           "connectTimeoutSecs",
           "autoAccept",
+          "deviceName",
         ],
       );
 
@@ -444,6 +451,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String filePath,
     required String peerAddress,
     String? optionalPin,
+    String? deviceName,
   }) {
     final sink = RustStreamSink<String>();
     unawaited(
@@ -456,6 +464,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_encode_String(filePath, serializer);
             sse_encode_String(peerAddress, serializer);
             sse_encode_opt_String(optionalPin, serializer);
+            sse_encode_opt_String(deviceName, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
@@ -468,7 +477,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeErrorData: sse_decode_AnyhowException,
           ),
           constMeta: kCrateApiPlenumApiStartSendConstMeta,
-          argValues: [sink, sessionToken, filePath, peerAddress, optionalPin],
+          argValues: [
+            sink,
+            sessionToken,
+            filePath,
+            peerAddress,
+            optionalPin,
+            deviceName,
+          ],
           apiImpl: this,
         ),
       ),
@@ -484,6 +500,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       "filePath",
       "peerAddress",
       "optionalPin",
+      "deviceName",
     ],
   );
 
@@ -496,6 +513,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String myPeerId,
     required String iceServersJson,
     required BigInt connectTimeoutSecs,
+    String? deviceName,
   }) {
     final sink = RustStreamSink<String>();
     unawaited(
@@ -511,6 +529,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_encode_String(myPeerId, serializer);
             sse_encode_String(iceServersJson, serializer);
             sse_encode_u_64(connectTimeoutSecs, serializer);
+            sse_encode_opt_String(deviceName, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
@@ -532,6 +551,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             myPeerId,
             iceServersJson,
             connectTimeoutSecs,
+            deviceName,
           ],
           apiImpl: this,
         ),
@@ -552,6 +572,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "myPeerId",
           "iceServersJson",
           "connectTimeoutSecs",
+          "deviceName",
         ],
       );
 
