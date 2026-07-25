@@ -1,10 +1,14 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { downloadDir } from "@tauri-apps/api/path";
-import { Copy, Check, Wifi, Globe } from "lucide-react";
-import { PlenumEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary, IceServer } from "../types/rust";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Copy, Check, Wifi, Globe, FolderOpen, CheckCircle2 } from "lucide-react";
+import { PlenumEvent, TransferEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary, IceServer } from "../types/rust";
 import { useSettings } from "../context/SettingsContext";
+import { addHistoryEntry } from "../services/history";
+import { formatBytes, formatDuration } from "../utils/format";
+import TransferAcceptDialog, { IncomingTransfer } from "../components/TransferAcceptDialog";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
 const STATE_LABELS: Record<string, string> = {
@@ -30,7 +34,14 @@ const ReceivePage: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [roomCodeCopied, setRoomCodeCopied] = useState(false);
+  const [incoming, setIncoming] = useState<IncomingTransfer | null>(null);
+  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [speedText, setSpeedText] = useState<string | null>(null);
+  const [etaText, setEtaText] = useState<string | null>(null);
+  const transferStartRef = useRef<number | null>(null);
   const { settings } = useSettings();
+  // The listen callback closes over the first render's outputDir otherwise.
+  const outputDirRef = useRef<string>("");
 
   const handleCopyPin = () => {
     if (pin) {
@@ -47,6 +58,109 @@ const ReceivePage: React.FC = () => {
       setTimeout(() => setRoomCodeCopied(false), 2000);
     }
   };
+
+  const handleAcceptResponse = (accept: boolean) => {
+    setIncoming(null);
+    invoke("respond_to_incoming_command", { accept }).catch(console.error);
+    if (!accept) setStatus("Transfer declined");
+  };
+
+  const handleOpenFolder = () => {
+    if (savedPath) {
+      revealItemInDir(savedPath).catch(console.error);
+    }
+  };
+
+  // Shared per-event handler for both local and internet receivers.
+  const handleTransferEvent = (trans: TransferEvent) => {
+    if ("StateChanged" in trans) {
+      if (trans.StateChanged.state !== "Closed") {
+        if (trans.StateChanged.state === "Listening") {
+          setStatus("Ready to receive files");
+        } else {
+          setStatus(friendlyState(trans.StateChanged.state));
+        }
+      }
+    } else if ("IncomingRequest" in trans) {
+      const req = trans.IncomingRequest;
+      // Quick-save keeps auto-accept: the engine is already proceeding, no
+      // dialog needed.
+      if (!settingsRef.current.receive.quickSave) {
+        setIncoming({
+          fileName: req.file_name,
+          totalBytes: req.total_bytes,
+          peer: req.peer,
+          senderName: req.sender_name,
+        });
+        setStatus("Incoming file — waiting for your decision");
+      }
+    } else if ("Cancelled" in trans) {
+      setIncoming(null);
+      setStatus("Transfer cancelled");
+      setProgress(null);
+      setSpeedText(null);
+      setEtaText(null);
+      transferStartRef.current = null;
+    } else if ("Declined" in trans) {
+      setIncoming(null);
+      setStatus(trans.Declined.reason === "cancelled" ? "Sender cancelled the transfer" : "Transfer declined");
+      setProgress(null);
+      setSpeedText(null);
+      setEtaText(null);
+      transferStartRef.current = null;
+    } else if ("Started" in trans) {
+      setIncoming(null);
+      setSavedPath(null);
+      setStatus(`Receiving ${trans.Started.file_name}...`);
+      setProgress({ transferred: 0, total: trans.Started.total_bytes });
+      transferStartRef.current = Date.now();
+      setSpeedText(null);
+      setEtaText(null);
+    } else if ("Progress" in trans) {
+      setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
+      if (transferStartRef.current) {
+        const elapsed = (Date.now() - transferStartRef.current) / 1000;
+        if (elapsed > 0) {
+          const speedBps = trans.Progress.transferred_bytes / elapsed;
+          setSpeedText(`${formatBytes(Math.round(speedBps))}/s`);
+          const remaining = trans.Progress.total_bytes - trans.Progress.transferred_bytes;
+          const eta = speedBps > 0 ? Math.round(remaining / speedBps) : 0;
+          setEtaText(eta > 0 ? `${eta}s left` : "");
+        }
+      }
+    } else if ("Completed" in trans) {
+      const summary: TransferSummary = trans.Completed;
+      const path = outputDirRef.current
+        ? `${outputDirRef.current}${outputDirRef.current.endsWith("\\") || outputDirRef.current.endsWith("/") ? "" : "\\"}${summary.file_name}`
+        : null;
+      addHistoryEntry({
+        direction: "receive",
+        fileName: summary.file_name,
+        size: summary.total_bytes,
+        peerName: summary.peer_name ?? summary.peer ?? "Unknown sender",
+        durationMs: summary.elapsed_ms,
+        mode: summary.mode,
+        path: path ?? undefined,
+        timestamp: new Date().toISOString(),
+      });
+      setStatus(
+        summary.elapsed_ms != null
+          ? `Received ${summary.file_name} in ${formatDuration(summary.elapsed_ms)}`
+          : `Received ${summary.file_name} successfully!`
+      );
+      setSavedPath(path);
+      setProgress(null);
+      setSpeedText(null);
+      setEtaText(null);
+      transferStartRef.current = null;
+    }
+  };
+
+  // Keep latest settings visible to the long-lived listen callback.
+  const settingsRef = useRef(settings);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+  const handleTransferEventRef = useRef(handleTransferEvent);
+  handleTransferEventRef.current = handleTransferEvent;
 
   useEffect(() => {
     invoke<string>("get_device_name").then(setDeviceName).catch(console.error);
@@ -68,41 +182,26 @@ const ReceivePage: React.FC = () => {
            if (typeof disc === "object" && "BroadcastStarted" in disc) {
              console.log("Broadcast started on port:", disc.BroadcastStarted.port);
              setPort(disc.BroadcastStarted.port);
-             if (settings.receive.requirePin) {
+             if (settingsRef.current.receive.requirePin) {
                setPin(disc.BroadcastStarted.token);
              }
            }
         } else if ("Transfer" in payload) {
-           const trans = payload.Transfer;
-            if ("StateChanged" in trans) {
-              if (trans.StateChanged.state !== "Closed") {
-                if (trans.StateChanged.state === "Listening") {
-                  setStatus("Ready to receive files");
-                } else if (trans.StateChanged.state === "Connected") {
-                  setStatus("Connected to device...");
-                } else {
-                  setStatus(friendlyState(trans.StateChanged.state));
-                }
-              }
-           } else if ("Started" in trans) {
-             setStatus(`Receiving ${trans.Started.file_name}...`);
-             setProgress({ transferred: 0, total: trans.Started.total_bytes });
-           } else if ("Progress" in trans) {
-             setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
-           } else if ("Completed" in trans) {
-             setStatus(`Received ${trans.Completed.file_name} successfully!`);
-             setProgress(null);
-           }
+           handleTransferEventRef.current(payload.Transfer);
         }
       });
 
       // 2. Resolve the real system Downloads directory
       const downloadsPath = await downloadDir();
+      outputDirRef.current = downloadsPath;
 
       const req: ReceiveRequest = {
         port: 0, // auto-assign; firewall allows the whole exe
         output_dir: downloadsPath,
         announce_on_lan: true,
+        require_pin: settings.receive.requirePin,
+        // Quick-save keeps auto-accept; otherwise the accept dialog gates.
+        auto_accept: settings.receive.quickSave,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
       };
@@ -135,24 +234,7 @@ const ReceivePage: React.FC = () => {
       unlisten = await listen<PlenumEvent>("plenum-event", (event) => {
         const payload = event.payload;
         if ("Transfer" in payload) {
-           const trans = payload.Transfer;
-            if ("StateChanged" in trans) {
-              if (trans.StateChanged.state !== "Closed") {
-                if (trans.StateChanged.state === "Connected") {
-                  setStatus("Connected to device...");
-                } else {
-                  setStatus(friendlyState(trans.StateChanged.state));
-                }
-              }
-           } else if ("Started" in trans) {
-             setStatus(`Receiving ${trans.Started.file_name}...`);
-             setProgress({ transferred: 0, total: trans.Started.total_bytes });
-           } else if ("Progress" in trans) {
-             setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
-           } else if ("Completed" in trans) {
-             setStatus(`Received ${trans.Completed.file_name} successfully!`);
-             setProgress(null);
-           }
+          handleTransferEventRef.current(payload.Transfer);
         }
       });
 
@@ -167,6 +249,7 @@ const ReceivePage: React.FC = () => {
       setStatus("Waiting for sender...");
 
       const downloadsPath = await downloadDir();
+      outputDirRef.current = downloadsPath;
 
       const iceServers: IceServer[] = [...DEFAULT_ICE_SERVERS];
       const turn = await invoke<IceServer | null>("fetch_turn_credentials_command", {
@@ -182,6 +265,7 @@ const ReceivePage: React.FC = () => {
         my_peer_id: myPeerId,
         ice_servers: iceServers,
         connect_timeout_secs: 30,
+        auto_accept: settings.receive.quickSave,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
       };
@@ -205,6 +289,8 @@ const ReceivePage: React.FC = () => {
 
   return (
     <div className="receive-container">
+      {incoming && <TransferAcceptDialog incoming={incoming} onRespond={handleAcceptResponse} />}
+
       <div className="card-grid" style={{ width: "100%", maxWidth: "300px", marginBottom: "24px" }}>
         <div className="action-card" onClick={() => setMode("local")} style={{ borderColor: mode === "local" ? "var(--accent-primary)" : "var(--border-color)" }}>
           <Wifi size={24} />
@@ -269,8 +355,29 @@ const ReceivePage: React.FC = () => {
               <div style={{ width: `${(progress.transferred / progress.total) * 100}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
             </div>
             <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "8px", textAlign: "center" }}>
-              {Math.round(progress.transferred / 1024 / 1024)} MB / {Math.round(progress.total / 1024 / 1024)} MB
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>{formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+                {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
+              </div>
             </div>
+          </div>
+        )}
+
+        {savedPath && (
+          <div style={{ marginTop: "16px", padding: "12px 20px", backgroundColor: "var(--bg-card)", borderRadius: "8px", border: "1px solid var(--accent-primary)", display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", maxWidth: "360px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <CheckCircle2 size={18} color="var(--accent-primary)" />
+              <div style={{ fontSize: "13px", color: "var(--text-primary)", fontWeight: 600, wordBreak: "break-all" }}>
+                Saved to {savedPath}
+              </div>
+            </div>
+            <button
+              onClick={handleOpenFolder}
+              style={{ display: "flex", alignItems: "center", gap: "6px", padding: "8px 16px", borderRadius: "8px", border: "none", backgroundColor: "var(--accent-primary)", color: "white", fontWeight: 600, cursor: "pointer", fontSize: "13px" }}
+            >
+              <FolderOpen size={16} />
+              Open folder
+            </button>
           </div>
         )}
       </div>

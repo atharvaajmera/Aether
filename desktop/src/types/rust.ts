@@ -21,6 +21,8 @@ export interface SendRequest {
     file_path: string;
     address?: string;
     discovery_token?: string;
+    // Omitted -> backend fills in whoami::devicename()
+    device_name?: string;
     permissions: CorePermissions;
     options: TransferOptions;
 }
@@ -29,6 +31,9 @@ export interface ReceiveRequest {
     port: number;
     output_dir: string;
     announce_on_lan: boolean;
+    device_name?: string;
+    require_pin?: boolean;
+    auto_accept?: boolean;
     permissions: CorePermissions;
     options: TransferOptions;
 }
@@ -46,6 +51,7 @@ export interface SendRemoteRequest {
     my_peer_id: string;
     ice_servers: IceServer[];
     connect_timeout_secs: number;
+    device_name?: string;
     permissions: CorePermissions;
     options: TransferOptions;
 }
@@ -57,6 +63,8 @@ export interface ReceiveRemoteRequest {
     my_peer_id: string;
     ice_servers: IceServer[];
     connect_timeout_secs: number;
+    auto_accept?: boolean;
+    device_name?: string;
     permissions: CorePermissions;
     options: TransferOptions;
 }
@@ -69,11 +77,16 @@ export interface DiscoverySummary {
 
 export type ConnectionState = "Discovering" | "Listening" | "Connecting" | "SignalingConnected" | "NegotiatingIce" | "Connected" | "Closed";
 export type TransferDirection = "Send" | "Receive";
+// How the peers are connected: LAN TCP, direct P2P WebRTC, or TURN relay.
+export type TransferMode = "Lan" | "Direct" | "Relay";
 
 export interface TransferSummary {
     direction: TransferDirection;
     file_name: string;
     peer?: string;
+    // Peer's device name when its build is new enough to send one.
+    peer_name?: string;
+    mode: TransferMode;
     total_bytes: number;
     transferred_bytes: number;
     resumed_bytes: number;
@@ -81,8 +94,13 @@ export interface TransferSummary {
 }
 
 // Struct variants mapped to standard objects inside the enum
-export type TransferEvent = 
+export type TransferEvent =
     | { StateChanged: { direction: TransferDirection, state: ConnectionState, peer?: string } }
+    | { IncomingRequest: { direction: TransferDirection, file_name: string, total_bytes: number, peer?: string, sender_name?: string } }
+    | { ConnectionEstablished: { direction: TransferDirection, mode: TransferMode } }
+    | { AwaitingApproval: { direction: TransferDirection, file_name: string } }
+    | { Cancelled: { direction: TransferDirection } }
+    | { Declined: { direction: TransferDirection, reason: string } }
     | { Started: { direction: TransferDirection, file_name: string, total_bytes: number, resumed_bytes: number } }
     | { Resumed: { direction: TransferDirection, next_sequence: number, resumed_bytes: number } }
     | { Progress: { direction: TransferDirection, transferred_bytes: number, total_bytes: number } }
