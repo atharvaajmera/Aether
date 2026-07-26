@@ -12,6 +12,7 @@ import '../services/settings_service.dart';
 
 import '../utils/transfer_status.dart';
 import '../utils/formatters.dart';
+import '../widgets/success_check.dart';
 import 'settings_screen.dart';
 
 class SendScreen extends StatefulWidget {
@@ -42,6 +43,13 @@ class _SendScreenState extends State<SendScreen> {
   String? _sessionToken;
   StreamSubscription<String>? _transferSub;
   bool _transferActive = false;
+  bool _showSuccess = false;
+  Timer? _autoResetTimer;
+  
+  String? _completedFileName;
+  String? _completedPeerName;
+  String? _completedDuration;
+  String? _completedMode;
 
   @override
   void initState() {
@@ -72,6 +80,7 @@ class _SendScreenState extends State<SendScreen> {
       } catch (_) {}
     }
     _transferSub?.cancel();
+    _autoResetTimer?.cancel();
     _roomCodeController.dispose();
     super.dispose();
   }
@@ -85,6 +94,24 @@ class _SendScreenState extends State<SendScreen> {
         cancelSession(sessionToken: token);
       } catch (_) {}
     }
+  }
+
+  void _resetTransferUi() {
+    _autoResetTimer?.cancel();
+    setState(() {
+      _transferStatus = '';
+      _progress = null;
+      _totalBytes = null;
+      _transferredBytes = null;
+      _transferStartTime = null;
+      _speedText = null;
+      _etaText = null;
+      _showSuccess = false;
+      _completedFileName = null;
+      _completedPeerName = null;
+      _completedDuration = null;
+      _completedMode = null;
+    });
   }
 
   void _startDiscovery() async {
@@ -112,8 +139,6 @@ class _SendScreenState extends State<SendScreen> {
             setState(() {
               final found = discEvent['PeerFound'];
               final token = found['token'];
-              // PIN-required peers announce an empty token, so only dedup by
-              // token when it is non-empty; address is always unique per peer.
               final duplicate = _peers.any((p) =>
                   p['address'] == found['address'] ||
                   (token != null && token.toString().isNotEmpty && p['token'] == token));
@@ -162,17 +187,19 @@ class _SendScreenState extends State<SendScreen> {
       if (trans['StateChanged'] != null) {
         final state = trans['StateChanged']['state'];
         if (state == 'Closed') {
-          setState(() {
-            _transferStatus = '';
-            _progress = null;
-            _totalBytes = null;
-            _transferredBytes = null;
-            _transferStartTime = null;
-            _speedText = null;
-            _etaText = null;
-            _isConnectingRemote = false;
-            _transferActive = false;
-          });
+          if (!_showSuccess) {
+            setState(() {
+              _transferStatus = '';
+              _progress = null;
+              _totalBytes = null;
+              _transferredBytes = null;
+              _transferStartTime = null;
+              _speedText = null;
+              _etaText = null;
+              _isConnectingRemote = false;
+              _transferActive = false;
+            });
+          }
         } else {
           setState(() => _transferStatus = friendlyState(state));
         }
@@ -238,18 +265,37 @@ class _SendScreenState extends State<SendScreen> {
       } else if (trans['Completed'] != null) {
         final summary = trans['Completed'];
         final settings = context.read<SettingsService>();
+        final peerName = summary['peer_name'] ??
+            summary['peer'] ??
+            _currentTransferPeerName ??
+            'Unknown device';
+        final elapsedMs = summary['elapsed_ms'];
+        final mode = formatTransferMode(summary['mode']);
         settings.addTransferHistory({
           'direction': 'send',
           'fileName': summary['file_name'] ?? _selectedFile?.split(RegExp(r'[\\/]')).last ?? 'Unknown file',
           'size': summary['total_bytes'] ?? _selectedFileSize,
-          'peerName': summary['peer'] ?? _currentTransferPeerName ?? 'Unknown device',
+          'peerName': peerName,
+          'durationMs': elapsedMs,
+          'mode': summary['mode'],
           'timestamp': DateTime.now().toIso8601String(),
         });
         setState(() {
-          _transferStatus = 'Sent successfully!';
+          _transferStatus = elapsedMs != null
+              ? 'Sent to $peerName in ${formatDuration(elapsedMs)}'
+              : 'Sent to $peerName';
           _progress = 1.0;
+          _showSuccess = true;
           _isConnectingRemote = false;
           _transferActive = false;
+          _completedFileName = summary['file_name'] ?? _selectedFile?.split(RegExp(r'[\\/]')).last ?? 'Unknown file';
+          _completedPeerName = peerName;
+          _completedDuration = elapsedMs != null ? formatDuration(elapsedMs) : null;
+          _completedMode = mode;
+        });
+        _autoResetTimer?.cancel();
+        _autoResetTimer = Timer(const Duration(seconds: 8), () {
+          if (mounted && _showSuccess) _resetTransferUi();
         });
       }
     }
@@ -261,11 +307,16 @@ class _SendScreenState extends State<SendScreen> {
 
     final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
     _sessionToken = sessionToken;
-    setState(() => _transferActive = true);
+    _autoResetTimer?.cancel();
+    setState(() {
+      _transferActive = true;
+      _showSuccess = false;
+    });
     _transferSub = startSend(
       filePath: _selectedFile!,
       peerAddress: address,
       optionalPin: pin,
+      deviceName: context.read<SettingsService>().deviceName,
       sessionToken: sessionToken,
     ).listen(
       _handleTransferEvent,
@@ -319,7 +370,11 @@ class _SendScreenState extends State<SendScreen> {
       );
       final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
       _sessionToken = sessionToken;
-      setState(() => _transferActive = true);
+      _autoResetTimer?.cancel();
+      setState(() {
+        _transferActive = true;
+        _showSuccess = false;
+      });
       _transferSub = startSendRemote(
         filePath: _selectedFile!,
         relayServerUrl: relayServerUrl,
@@ -327,6 +382,7 @@ class _SendScreenState extends State<SendScreen> {
         myPeerId: myPeerId,
         iceServersJson: iceServersJson,
         connectTimeoutSecs: BigInt.from(30),
+        deviceName: settings.deviceName,
         sessionToken: sessionToken,
       ).listen(
         _handleTransferEvent,
@@ -582,6 +638,79 @@ class _SendScreenState extends State<SendScreen> {
 
   Widget _buildStatusCard() {
     if (_transferStatus.isEmpty) return const SizedBox.shrink();
+    if (_showSuccess) {
+      return Container(
+        margin: const EdgeInsets.only(top: 8),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppTheme.bgSidebar,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AppTheme.accentPrimary.withValues(alpha: 0.3)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Center(child: SuccessCheck()),
+            const SizedBox(height: 12),
+            Text(
+              'Sent ${_completedFileName ?? "file"}',
+              style: const TextStyle(color: AppTheme.textPrimary, fontSize: 16, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: AppTheme.bgCard,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppTheme.borderColor),
+              ),
+              child: Column(
+                children: [
+                  if (_completedPeerName != null) ...[
+                    Row(
+                      children: [
+                        const Icon(Icons.monitor, size: 16, color: AppTheme.textSecondary),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(_completedPeerName!, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13))),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  Row(
+                    children: [
+                      const Icon(Icons.timer_outlined, size: 16, color: AppTheme.textSecondary),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${_completedDuration ?? "-"} • ${_completedMode ?? "Unknown"}',
+                          style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _resetTransferUi,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.accentPrimary,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                child: const Text('Send Another File', style: TextStyle(fontWeight: FontWeight.w600)),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       margin: const EdgeInsets.only(top: 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -652,17 +781,7 @@ class _SendScreenState extends State<SendScreen> {
             Padding(
               padding: const EdgeInsets.only(top: 8),
               child: ElevatedButton(
-                onPressed: () {
-                  setState(() {
-                    _transferStatus = '';
-                    _progress = null;
-                    _totalBytes = null;
-                    _transferredBytes = null;
-                    _transferStartTime = null;
-                    _speedText = null;
-                    _etaText = null;
-                  });
-                },
+                onPressed: _resetTransferUi,
                 child: const Text('Send another file'),
               ),
             )
