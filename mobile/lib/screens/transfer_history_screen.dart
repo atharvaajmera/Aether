@@ -32,7 +32,10 @@ class TransferHistoryScreen extends StatelessWidget {
                 final peer = item['peerName'] ?? 'Unknown device';
                 final path = item['path'];
                 final timestamp = item['timestamp'] != null ? DateTime.parse(item['timestamp']) : DateTime.now();
-                final timeStr = timestamp.toString().substring(0, 16); // yyyy-MM-dd HH:mm
+                final timeStr = timestamp.toString().substring(0, 16); 
+                final durationMs = item['durationMs'];
+                final durationStr = durationMs is int ? formatDuration(durationMs) : '—';
+                final modeLabel = formatTransferMode(item['mode']);
 
                 return ListTile(
                   leading: CircleAvatar(
@@ -44,15 +47,50 @@ class TransferHistoryScreen extends StatelessWidget {
                     ),
                   ),
                   title: Text(fileName, style: const TextStyle(color: AppTheme.textPrimary)),
-                  subtitle: Text(
-                    '${isSend ? 'To' : 'From'} $peer • ${formatBytes(size)}\n$timeStr',
-                    style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${isSend ? 'To' : 'From'} $peer • ${formatBytes(size)} • $durationStr',
+                        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                      ),
+                      const SizedBox(height: 2),
+                      Row(
+                        children: [
+                          _ModeChip(label: modeLabel ?? '—'),
+                          const SizedBox(width: 6),
+                          Text(timeStr, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                        ],
+                      ),
+                    ],
                   ),
                   isThreeLine: true,
                   onTap: (!isSend && path != null) ? () => OpenFilex.open(path) : null,
                 );
               },
             ),
+    );
+  }
+}
+
+class _ModeChip extends StatelessWidget {
+  final String label;
+
+  const _ModeChip({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: AppTheme.accentPrimary.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.accentPrimary.withValues(alpha: 0.35)),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(color: AppTheme.accentPrimary, fontSize: 10, fontWeight: FontWeight.w600),
+      ),
     );
   }
 }
