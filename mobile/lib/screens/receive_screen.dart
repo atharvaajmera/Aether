@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:network_info_plus/network_info_plus.dart';
+import 'dart:io';
 import 'package:open_filex/open_filex.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:flutter/material.dart';
@@ -16,6 +16,7 @@ import '../services/settings_service.dart';
 
 import '../utils/transfer_status.dart';
 import '../utils/formatters.dart';
+import '../widgets/success_check.dart';
 import 'settings_screen.dart';
 
 class ReceiveScreen extends StatefulWidget {
@@ -53,7 +54,6 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
   StreamSubscription<String>? _localSub;
   StreamSubscription<String>? _remoteSub;
-  String? _localAddress;
   String? _sessionToken;
   bool _requirePinActive = false;
   bool _autoAcceptActive = true;
@@ -65,17 +65,12 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   String? _etaText;
   String? _savedFilePath;
   String? _savedLocation;
+  Timer? _reArmTimer;
 
-  void _fetchAndSetLocalAddress(int port) async {
-    try {
-      final ip = await NetworkInfo().getWifiIP();
-      if (ip != null && mounted) {
-        setState(() {
-          _localAddress = '$ip:$port';
-        });
-      }
-    } catch (_) {}
-  }
+  // Summary fields kept for the success card after completion.
+  String? _completedPeerName;
+  String? _completedDuration;
+  String? _completedMode;
 
   void _handleLogEvent(dynamic log) {
     final level = log['level'];
@@ -95,9 +90,25 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         cancelSession(sessionToken: token);
       } catch (_) {}
     }
+    // Clean up app-dir copy if it was already exported to Downloads.
+    _deleteAppDirCopyIfExported();
     _localSub?.cancel();
     _remoteSub?.cancel();
+    _reArmTimer?.cancel();
     super.dispose();
+  }
+
+  /// Deletes the app-dir copy of the received file if it was successfully
+  /// exported to public Downloads. The app-dir copy is only needed for
+  /// Open/Share; once the user moves on, reclaim the space.
+  void _deleteAppDirCopyIfExported() {
+    final path = _savedFilePath;
+    if (path != null && _savedLocation != null) {
+      try {
+        final f = File(path);
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+    }
   }
 
   void _stopReceiving() {
@@ -111,6 +122,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     _sessionToken = null;
     _localSub?.cancel();
     _remoteSub?.cancel();
+    _reArmTimer?.cancel();
     setState(() {
       _isListening = false;
       _remoteStarted = false;
@@ -119,7 +131,6 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       _requirePinActive = false;
       _roomCode = null;
       _progress = null;
-      _localAddress = null;
       _totalBytes = null;
       _transferredBytes = null;
       _transferStartTime = null;
@@ -188,7 +199,6 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
             _pin = discEvent['BroadcastStarted']['token'];
             _statusMessage = 'Ready to receive files';
           });
-          _fetchAndSetLocalAddress(port);
         }
       } else if (event['Transfer'] != null) {
         _handleTransferEvent(event['Transfer'], outputDir);
@@ -218,6 +228,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         fileName: req['file_name'] ?? 'Unknown file',
         totalBytes: req['total_bytes'] ?? 0,
         peer: req['peer'],
+        senderName: req['sender_name'],
       );
     } else if (transEvent['Cancelled'] != null) {
       setState(() {
@@ -271,25 +282,36 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       final summary = transEvent['Completed'];
       final fileName = summary['file_name'];
       final localPath = fileName != null ? '$outputDir/$fileName' : null;
+      final peerName = summary['peer_name'] ?? summary['peer'] ?? 'Unknown sender';
+      final elapsedMs = summary['elapsed_ms'];
+      final mode = formatTransferMode(summary['mode']);
       final settings = context.read<SettingsService>();
       settings.addTransferHistory({
         'direction': 'receive',
         'fileName': fileName ?? 'Unknown file',
         'size': summary['total_bytes'] ?? _totalBytes,
-        'peerName': summary['peer'] ?? 'Unknown sender',
+        'peerName': peerName,
+        'durationMs': elapsedMs,
+        'mode': summary['mode'],
         'path': localPath,
         'timestamp': DateTime.now().toIso8601String(),
       });
+
+      // Build a rich status message with summary details.
+      String statusMsg = 'Transfer complete!';
+      if (elapsedMs != null) {
+        statusMsg = 'Received from $peerName in ${formatDuration(elapsedMs)}';
+      }
+
       setState(() {
-        _statusMessage = 'Transfer complete!';
+        _statusMessage = statusMsg;
         _progress = 1.0;
-        // Keep the app-dir path for Open/Share: they need a real file path,
-        // which the MediaStore copy in Downloads doesn't expose.
         _savedFilePath = localPath;
         _savedLocation = null;
+        _completedPeerName = peerName;
+        _completedDuration = elapsedMs != null ? formatDuration(elapsedMs) : null;
+        _completedMode = mode;
       });
-      // Copy into public Downloads via MediaStore (no permission needed on
-      // Android 10+). Best-effort: the file is safe in app storage either way.
       if (localPath != null) {
         ReceiveStorage.exportToDownloads(localPath).then((saved) {
           if (mounted && saved != null) {
@@ -297,16 +319,36 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
           }
         });
       }
+      _reArmTimer?.cancel();
+      _reArmTimer = Timer(const Duration(seconds: 8), () {
+        if (mounted && _progress == 1.0) _reArmReceiving();
+      });
     }
   }
 
-  /// Accept gate: shown when the engine emits `IncomingRequest` and
-  /// auto-accept is off. The Rust loop blocks until we answer (or its
-  /// 120s approval timeout declines for us).
+  void _reArmReceiving() {
+    final saved = _savedFilePath;
+    final savedLoc = _savedLocation;
+    // Delete the app-dir copy now that the user has had time to Open/Share.
+    _deleteAppDirCopyIfExported();
+    _stopReceiving();
+    setState(() {
+      _savedFilePath = saved;
+      _savedLocation = savedLoc;
+      _progress = 1.0; // keep the saved-file card visible
+    });
+    if (_mode == TransferMode.local) {
+      _startLocalReceiver();
+    } else {
+      _setupRemoteReceiver();
+    }
+  }
+
   Future<void> _showIncomingRequestDialog({
     required String fileName,
     required int totalBytes,
     String? peer,
+    String? senderName,
   }) async {
     if (_autoAcceptActive) return; // engine already proceeding
     final token = _sessionToken;
@@ -324,7 +366,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
             Text(fileName, style: const TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 4),
             Text(formatBytes(totalBytes), style: const TextStyle(color: AppTheme.textSecondary)),
-            if (peer != null) ...[
+            if (senderName != null) ...[
+              const SizedBox(height: 8),
+              Text('From: $senderName',
+                  style: const TextStyle(color: AppTheme.textPrimary, fontWeight: FontWeight.w600, fontSize: 14)),
+              if (peer != null) ...[
+                const SizedBox(height: 2),
+                Text(peer, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+              ],
+            ] else if (peer != null) ...[
               const SizedBox(height: 4),
               Text('From: $peer', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             ],
@@ -412,6 +462,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       connectTimeoutSecs: BigInt.from(600),
       sessionToken: sessionToken,
       autoAccept: autoAccept,
+      deviceName: settings.deviceName,
     ).listen((eventJson) {
       if (!mounted) return;
       final event = jsonDecode(eventJson);
@@ -653,7 +704,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 code: _pin!,
                 copied: _copied,
                 onCopy: _copyPin,
-                footer: _localAddress != null ? 'Your address: $_localAddress' : null,
+
               ),
             if (_mode == TransferMode.internet && _roomCode != null)
               _buildCodeCard(
@@ -707,14 +758,60 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                     ),
                     if (_progress == 1.0 && _savedFilePath != null) ...[
                       const SizedBox(height: 8),
-                      Text(
-                        _savedLocation != null ? 'Saved to $_savedLocation' : 'Saving to Downloads...',
-                        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                        textAlign: TextAlign.center,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
+                      const Center(child: SuccessCheck()),
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: AppTheme.bgCard,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: AppTheme.borderColor),
+                        ),
+                        child: Column(
+                          children: [
+                            if (_completedPeerName != null) ...[
+                              Row(
+                                children: [
+                                  const Icon(Icons.monitor, size: 16, color: AppTheme.textSecondary),
+                                  const SizedBox(width: 8),
+                                  Expanded(child: Text(_completedPeerName!, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13))),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                            ],
+                            Row(
+                              children: [
+                                const Icon(Icons.timer_outlined, size: 16, color: AppTheme.textSecondary),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    '${_completedDuration ?? "-"} • ${_completedMode ?? "Unknown"}',
+                                    style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
                       const SizedBox(height: 8),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: AppTheme.accentPrimary.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: AppTheme.accentPrimary.withValues(alpha: 0.4)),
+                        ),
+                        child: Text(
+                          _savedLocation != null ? 'Saved to $_savedLocation' : 'Saving to Downloads...',
+                          style: const TextStyle(color: AppTheme.textPrimary, fontSize: 12, fontWeight: FontWeight.w600),
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
                       Row(
                         children: [
                           Expanded(
