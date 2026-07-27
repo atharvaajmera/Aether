@@ -747,7 +747,7 @@ class _SendScreenState extends State<SendScreen> {
             Row(
               children: [
                 Text(
-                  '${(_progress! * 100).toStringAsFixed(1)}%',
+                  '${(_progress! * 100).toStringAsFixed(1)}%  •  ${formatBytes(_transferredBytes ?? 0)} / ${formatBytes(_totalBytes ?? 0)}',
                   style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
                 ),
                 if (_speedText != null && _etaText != null) ...[
@@ -858,21 +858,11 @@ class _SendScreenState extends State<SendScreen> {
             child: _peers.isEmpty
                 ? (_isDiscovering
                     ? const Center(child: CircularProgressIndicator(color: AppTheme.accentPrimary))
-                    : Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Text(
-                              'No devices found.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: AppTheme.textSecondary),
-                            ),
-                            const SizedBox(height: 12),
-                            ElevatedButton(
-                              onPressed: _startDiscovery,
-                              child: const Text('Search again'),
-                            ),
-                          ],
+                    : const Center(
+                        child: Text(
+                          'No devices found.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: AppTheme.textSecondary),
                         ),
                       ))
                 : ListView.separated(

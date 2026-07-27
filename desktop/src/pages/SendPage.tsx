@@ -332,7 +332,7 @@ const SendPage: React.FC = () => {
                     <div style={{ width: `${(progress.transferred / progress.total) * 100}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "12px", color: "var(--text-secondary)" }}>
-                    <span>{formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+                    <span>{Math.round((progress.transferred / progress.total) * 100)}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
                     {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
                   </div>
                 </div>
@@ -433,7 +433,7 @@ const SendPage: React.FC = () => {
                   <div style={{ width: `${(progress.transferred / progress.total) * 100}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "12px", color: "var(--text-secondary)" }}>
-                  <span>{formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+                  <span>{Math.round((progress.transferred / progress.total) * 100)}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
                   {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
                 </div>
               </div>

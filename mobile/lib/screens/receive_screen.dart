@@ -699,8 +699,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
             if (_mode == TransferMode.local && _pin != null)
               _buildCodeCard(
                 caption: _requirePinActive
-                    ? 'PIN required — senders must enter this code'
-                    : 'Pairing code — senders can use this to find you',
+                    ? 'PIN required senders must enter this code'
+                    : 'Pairing code - senders can use this to find you',
                 code: _pin!,
                 copied: _copied,
                 onCopy: _copyPin,
@@ -740,7 +740,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                     Row(
                       children: [
                         Text(
-                          '${(_progress! * 100).toStringAsFixed(1)}%',
+                          '${(_progress! * 100).toStringAsFixed(1)}%  •  ${formatBytes(_transferredBytes ?? 0)} / ${formatBytes(_totalBytes ?? 0)}',
                           style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
                         ),
                         if (_speedText != null && _etaText != null) ...[

@@ -356,7 +356,7 @@ const ReceivePage: React.FC = () => {
             </div>
             <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "8px", textAlign: "center" }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>{formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+                <span>{Math.round((progress.transferred / progress.total) * 100)}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
                 {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
               </div>
             </div>
