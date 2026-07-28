@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "desktop",
+  "productName": "Plenum",
   "version": "0.1.0",
   "identifier": "com.plenum.desktop",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "desktop",
+        "title": "Plenum",
         "width": 800,
         "height": 600
       }
@@ -41,8 +41,7 @@
     ],
     "windows": {
       "nsis": {
-        "installerIcon": "icons/icon.ico",
-        "template": "nsis/installer.nsi"
+        "installerIcon": "icons/icon.ico"
       }
     }
   }
