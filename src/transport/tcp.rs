@@ -187,8 +187,21 @@ impl Transport for TcpTransport {
 
     fn close(&mut self) -> TransportResult<()> {
         self.closed = true;
-        self.stream.shutdown(std::net::Shutdown::Both)?;
-        Ok(())
+        match self.stream.shutdown(std::net::Shutdown::Both) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotConnected
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn is_closed(&self) -> bool {

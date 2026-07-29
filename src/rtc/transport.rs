@@ -219,8 +219,7 @@ impl RtcTransport {
                     break;
                 }
             }
-            // Bounded wait (~5s) for the send buffer to empty. Ordered/reliable
-            // SCTP guarantees delivery once buffered_amount reaches zero.
+            // Bounded wait (~5s) for the send buffer to empty. 
             for _ in 0..500 {
                 if data_channel.buffered_amount().await == 0 {
                     break;
@@ -231,9 +230,6 @@ impl RtcTransport {
             let _ = peer_connection.close().await;
         });
 
-        // Wait for the background thread's connect outcome in short slices so
-        // a local cancel (user backed out / switched modes) takes effect
-        // promptly instead of after the full connect timeout.
         let deadline = Instant::now() + connect_timeout;
         let outcome = loop {
             match outcome_rx.recv_timeout(Duration::from_millis(100)) {
@@ -298,10 +294,13 @@ impl Transport for RtcTransport {
         if self.closed {
             return Err(TransportError::Closed);
         }
-        match self.inbound_rx.try_recv() {
+        match self
+            .inbound_rx
+            .recv_timeout(Duration::from_millis(1))
+        {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(std_mpsc::TryRecvError::Empty) => Ok(None),
-            Err(std_mpsc::TryRecvError::Disconnected) => {
+            Err(std_mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => {
                 self.closed = true;
                 Err(TransportError::Closed)
             }

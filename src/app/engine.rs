@@ -45,6 +45,14 @@ const CHECKPOINT_SAVE_BYTES: u64 = 4 * 1024 * 1024;
 
 const RECEIVE_STALL_TIMEOUT: Duration = Duration::from_secs(45);
 
+const STREAM_MODE_MAGIC: &[u8] = b"PLENUM_STREAM_V1";
+
+const STREAM_ACK_INTERVAL_BYTES: u64 = 2 * 1024 * 1024;
+
+const STREAM_RECV_POLL_BYTES: u64 = 1024 * 1024;
+
+const RTC_MAX_CHUNK_SIZE: usize = 32 * 1024;
+
 #[derive(Debug, Default)]
 pub struct PlenumCore {
     signaling: SignalingState,
@@ -133,10 +141,11 @@ impl PlenumCore {
 
     pub fn send_file_remote<S: EventSink>(
         &mut self,
-        request: SendRemoteRequest,
+        mut request: SendRemoteRequest,
         sink: &mut S,
     ) -> Result<TransferSummary, AppError> {
         validate_send_remote_request(&request)?;
+        request.options.chunk_size = request.options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
         let started_at = Instant::now();
         let mut file = File::open(&request.file_path)?;
         let file_size = file.metadata()?.len();
@@ -343,10 +352,11 @@ impl PlenumCore {
 
     pub fn receive_file_remote<S: EventSink>(
         &mut self,
-        request: ReceiveRemoteRequest,
+        mut request: ReceiveRemoteRequest,
         sink: &mut S,
     ) -> Result<TransferSummary, AppError> {
         validate_receive_remote_request(&request)?;
+        request.options.chunk_size = request.options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
         create_dir_all(&request.output_dir)?;
         let started_at = Instant::now();
         let control = self.control.clone();
@@ -823,7 +833,7 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         direction: TransferDirection::Send,
         file_name: file_name.clone(),
     }));
-    let (mut sequence_no, resume_bytes, receiver_name) =
+    let (mut sequence_no, resume_bytes, receiver_name, receiver_streams) =
         wait_for_accept(transport, control, sink, TransferDirection::Send)?;
 
     if resume_bytes > 0 {
@@ -842,6 +852,96 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         resumed_bytes: resume_bytes,
     }));
 
+    sink.emit(PlenumEvent::Log {
+        level: LogLevel::Info,
+        message: format!(
+            "DIAG send: transfer loop start, file={file_name} size={file_size} chunk={} window={}",
+            options.chunk_size, options.window_size
+        ),
+    });
+
+    // Streaming mode: only over TCP (is_relayed() is None on the LAN path) and
+    // only when the receiver offered it during the accept handshake. The
+    // confirmation Resume must precede the first Data packet; TCP ordering
+    // guarantees the receiver switches modes before any data arrives.
+    let streaming = receiver_streams && transport.is_relayed().is_none();
+    if streaming {
+        transport.send(&encode_packet(&Packet::new(
+            PacketType::Resume,
+            0,
+            STREAM_MODE_MAGIC.to_vec(),
+        ))?)?;
+        sink.emit(PlenumEvent::Log {
+            level: LogLevel::Info,
+            message: "DIAG send: streaming mode enabled (cumulative ACKs over TCP)".to_string(),
+        });
+        run_streaming_send_loop(
+            transport,
+            sink,
+            file,
+            file_size,
+            options.chunk_size,
+            sequence_no,
+            resume_bytes,
+            control,
+        )?;
+    } else {
+        run_windowed_send_loop(
+            transport,
+            sink,
+            file,
+            file_size,
+            options,
+            &mut sequence_no,
+            resume_bytes,
+            control,
+        )?;
+
+        transport.send(&encode_packet(&Packet::new(
+            PacketType::Finish,
+            sequence_no,
+            Vec::new(),
+        ))?)?;
+    }
+
+    let mode = transfer_mode(transport);
+    transport.close()?;
+
+    let summary = TransferSummary {
+        direction: TransferDirection::Send,
+        file_name,
+        peer: peer_label,
+        peer_name: receiver_name,
+        mode,
+        total_bytes: file_size,
+        transferred_bytes: file_size,
+        resumed_bytes: resume_bytes,
+        elapsed_ms: started_at.elapsed().as_millis(),
+    };
+    sink.emit(PlenumEvent::Transfer(TransferEvent::Completed(
+        summary.clone(),
+    )));
+    sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+        direction: TransferDirection::Send,
+        state: ConnectionState::Closed,
+        peer: summary.peer.clone(),
+    }));
+    Ok(summary)
+}
+
+/// Legacy send path: sliding window with per-packet ACKs and retransmits.
+/// Required for RTC transports (message-based, no delivery guarantee surfaced
+/// to this layer) and for LAN peers that predate streaming mode.
+fn run_windowed_send_loop<T: Transport, S: EventSink>(
+    transport: &mut T,
+    sink: &mut S,
+    file: &mut File,
+    file_size: u64,
+    options: &crate::app::types::TransferOptions,
+    sequence_no: &mut u32,
+    resume_bytes: u64,
+    control: &SessionControl,
+) -> Result<(), AppError> {
     let mut sender = SenderWindow::new(options.window_size, options.timeout_ticks)?;
     let mut ack_sizes = BTreeMap::<u32, usize>::new();
     let mut file_done = resume_bytes >= file_size;
@@ -854,19 +954,12 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     let mut diag_acks_recv: u64 = 0;
     let mut diag_data_sent: u64 = 0;
     let mut diag_last = now_ms();
-    sink.emit(PlenumEvent::Log {
-        level: LogLevel::Info,
-        message: format!(
-            "DIAG send: transfer loop start, file={file_name} size={file_size} chunk={} window={}",
-            options.chunk_size, options.window_size
-        ),
-    });
 
     loop {
         if control.is_cancelled() {
             let _ = transport.send(&encode_packet(&Packet::new(
                 PacketType::Close,
-                sequence_no,
+                *sequence_no,
                 CLOSE_REASON_CANCELLED.as_bytes().to_vec(),
             ))?);
             let _ = transport.close();
@@ -884,15 +977,13 @@ fn run_send_transfer<T: Transport, S: EventSink>(
                 break;
             }
 
-            let packet = Packet::new(PacketType::Data, sequence_no, buffer[..n].to_vec());
+            let packet = Packet::new(PacketType::Data, *sequence_no, buffer[..n].to_vec());
             sender.enqueue(packet)?;
-            ack_sizes.insert(sequence_no, n);
-            sequence_no = sequence_no.saturating_add(1);
+            ack_sizes.insert(*sequence_no, n);
+            *sequence_no = sequence_no.saturating_add(1);
         }
 
-        let mut got_inbound = false;
         while let Some(frame) = transport.recv()? {
-            got_inbound = true;
             last_inbound = Instant::now();
             let ctrl_packet = parse_packet(&frame)?;
             match ctrl_packet.packet_type {
@@ -966,9 +1057,10 @@ fn run_send_transfer<T: Transport, S: EventSink>(
             )));
         }
 
-        if just_sent == 0 && !got_inbound && sender.in_flight_len() >= options.window_size {
-            thread::sleep(Duration::from_millis(1));
-        }
+        // No explicit idle sleep here: when there is nothing to send or
+        // receive, `transport.recv()` above already blocked for the
+        // transport's read timeout, which paces the loop without the ~15.6ms
+        // quantization `thread::sleep(1ms)` suffers on Windows.
     }
 
     if progress_dirty {
@@ -985,35 +1077,195 @@ fn run_send_transfer<T: Transport, S: EventSink>(
             "DIAG send: transfer loop END data_sent={diag_data_sent} acks_recv={diag_acks_recv} bytes_acked={bytes_acked}"
         ),
     });
+    Ok(())
+}
 
-    transport.send(&encode_packet(&Packet::new(
-        PacketType::Finish,
-        sequence_no,
-        Vec::new(),
-    ))?)?;
-    let mode = transfer_mode(transport);
-    transport.close()?;
+/// Streaming send path (TCP only, negotiated via `STREAM_MODE_MAGIC`): Data
+/// packets are written back-to-back with no window gate — the blocking TCP
+/// send provides backpressure — and the receiver's sparse cumulative ACKs
+/// drive progress reporting. No retransmits: TCP already guarantees ordered
+/// delivery, so a mid-transfer gap is impossible rather than recoverable.
+#[allow(clippy::too_many_arguments)]
+fn run_streaming_send_loop<T: Transport, S: EventSink>(
+    transport: &mut T,
+    sink: &mut S,
+    file: &mut File,
+    file_size: u64,
+    chunk_size: usize,
+    mut sequence_no: u32,
+    resume_bytes: u64,
+    control: &SessionControl,
+) -> Result<(), AppError> {
+    let mut buffer = vec![0u8; chunk_size];
+    let mut ack_sizes = BTreeMap::<u32, usize>::new();
+    let mut bytes_acked = resume_bytes;
+    let mut bytes_sent = resume_bytes;
+    let mut file_done = resume_bytes >= file_size;
+    let mut finish_sent = false;
+    let mut last_inbound = Instant::now();
+    let mut last_progress_emit = Instant::now() - PROGRESS_EMIT_INTERVAL;
+    let mut bytes_since_poll: u64 = 0;
+    let mut diag_data_sent: u64 = 0;
+    let mut diag_acks_recv: u64 = 0;
+    let mut diag_last = now_ms();
 
-    let summary = TransferSummary {
+    loop {
+        if control.is_cancelled() {
+            let _ = transport.send(&encode_packet(&Packet::new(
+                PacketType::Close,
+                sequence_no,
+                CLOSE_REASON_CANCELLED.as_bytes().to_vec(),
+            ))?);
+            let _ = transport.close();
+            sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
+                direction: TransferDirection::Send,
+            }));
+            return Err(AppError::Cancelled);
+        }
+
+        if !file_done {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                file_done = true;
+            } else {
+                let packet = Packet::new(PacketType::Data, sequence_no, buffer[..n].to_vec());
+                transport.send(&encode_packet(&packet)?)?;
+                ack_sizes.insert(sequence_no, n);
+                sequence_no = sequence_no.saturating_add(1);
+                bytes_sent = bytes_sent.saturating_add(n as u64);
+                bytes_since_poll = bytes_since_poll.saturating_add(n as u64);
+                diag_data_sent = diag_data_sent.saturating_add(1);
+            }
+        }
+
+        // The Finish goes out immediately after the last Data packet so the
+        // receiver knows to emit its final cumulative ACK: the tail of the
+        // file is usually smaller than STREAM_ACK_INTERVAL_BYTES and would
+        // otherwise never be acknowledged.
+        if file_done && !finish_sent {
+            finish_sent = true;
+            transport.send(&encode_packet(&Packet::new(
+                PacketType::Finish,
+                sequence_no,
+                Vec::new(),
+            ))?)?;
+        }
+
+        // Draining the socket every chunk would cost the ~5ms empty-socket
+        // read timeout per call; only poll every STREAM_RECV_POLL_BYTES while
+        // data is still flowing, then continuously once the file is done.
+        if file_done || bytes_since_poll >= STREAM_RECV_POLL_BYTES {
+            bytes_since_poll = 0;
+            loop {
+                // Fully acknowledged: stop draining. The receiver tears its
+                // side down right after the final cumulative ACK, so another
+                // recv() here would surface that EOF as a spurious error.
+                if file_done && bytes_acked >= file_size {
+                    break;
+                }
+                let frame = match transport.recv() {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => break,
+                    Err(error) => {
+                        if file_done && bytes_acked >= file_size {
+                            break;
+                        }
+                        return Err(error.into());
+                    }
+                };
+                last_inbound = Instant::now();
+                let ctrl_packet = parse_packet(&frame)?;
+                match ctrl_packet.packet_type {
+                    PacketType::Ack => {
+                        diag_acks_recv = diag_acks_recv.saturating_add(1);
+                        // Cumulative: one ACK covers every outstanding
+                        // sequence up to and including its sequence number.
+                        let acked: Vec<u32> = ack_sizes
+                            .range(..=ctrl_packet.sequence_no)
+                            .map(|(&seq, _)| seq)
+                            .collect();
+                        for seq in acked {
+                            if let Some(size) = ack_sizes.remove(&seq) {
+                                bytes_acked = bytes_acked.saturating_add(size as u64);
+                            }
+                        }
+                        if last_progress_emit.elapsed() >= PROGRESS_EMIT_INTERVAL
+                            || bytes_acked >= file_size
+                        {
+                            last_progress_emit = Instant::now();
+                            sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
+                                direction: TransferDirection::Send,
+                                transferred_bytes: bytes_acked.min(file_size),
+                                total_bytes: file_size,
+                            }));
+                        }
+                    }
+                    PacketType::Close => {
+                        let reason =
+                            String::from_utf8_lossy(&ctrl_packet.payload).into_owned();
+                        sink.emit(PlenumEvent::Transfer(TransferEvent::Declined {
+                            direction: TransferDirection::Send,
+                            reason: reason.clone(),
+                        }));
+                        return Err(AppError::Rejected(rejection_message(&reason)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let now = now_ms();
+        if now.saturating_sub(diag_last) >= 1000 {
+            diag_last = now;
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Info,
+                message: format!(
+                    "DIAG send: streaming data_sent={diag_data_sent} acks_recv={diag_acks_recv} bytes_sent={bytes_sent} bytes_acked={bytes_acked} seq_next={sequence_no}"
+                ),
+            });
+        }
+
+        for diag in transport.poll_diagnostics() {
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Info,
+                message: diag,
+            });
+        }
+
+        if file_done {
+            if bytes_acked >= file_size {
+                break;
+            }
+            if last_inbound.elapsed() >= SEND_STALL_TIMEOUT {
+                return Err(AppError::Stalled(format!(
+                    "no cumulative ACK from receiver for {}s ({} of {} bytes acknowledged)",
+                    SEND_STALL_TIMEOUT.as_secs(),
+                    bytes_acked,
+                    file_size
+                )));
+            }
+        } else if bytes_acked < bytes_sent && last_inbound.elapsed() >= SEND_STALL_TIMEOUT {
+            return Err(AppError::Stalled(format!(
+                "no packets from receiver for {}s ({} bytes unacknowledged)",
+                SEND_STALL_TIMEOUT.as_secs(),
+                bytes_sent - bytes_acked
+            )));
+        }
+    }
+
+    sink.emit(PlenumEvent::Log {
+        level: LogLevel::Info,
+        message: format!(
+            "DIAG send: streaming loop END data_sent={diag_data_sent} acks_recv={diag_acks_recv} bytes_acked={bytes_acked}"
+        ),
+    });
+
+    sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
         direction: TransferDirection::Send,
-        file_name,
-        peer: peer_label,
-        peer_name: receiver_name,
-        mode,
+        transferred_bytes: bytes_acked.min(file_size),
         total_bytes: file_size,
-        transferred_bytes: file_size,
-        resumed_bytes: resume_bytes,
-        elapsed_ms: started_at.elapsed().as_millis(),
-    };
-    sink.emit(PlenumEvent::Transfer(TransferEvent::Completed(
-        summary.clone(),
-    )));
-    sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
-        direction: TransferDirection::Send,
-        state: ConnectionState::Closed,
-        peer: summary.peer.clone(),
     }));
-    Ok(summary)
+    Ok(())
 }
 
 fn run_receive_transfer<T: Transport, S: EventSink>(
@@ -1040,6 +1292,14 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     let mut last_checkpoint_save = Instant::now() - CHECKPOINT_SAVE_INTERVAL;
     let mut bytes_since_checkpoint = 0u64;
     let mut progress_dirty = false;
+
+    // Streaming mode handshake state: `stream_offered` is set once we advertise
+    // the capability (LAN/TCP only, during Start handling); `streaming` flips
+    // when the sender's confirmation Resume arrives, which TCP ordering
+    // guarantees happens before the first Data packet of the transfer.
+    let mut stream_offered = false;
+    let mut streaming = false;
+    let mut bytes_since_stream_ack = 0u64;
 
     let mut diag_data_recv: u64 = 0;
     let mut diag_acks_sent: u64 = 0;
@@ -1120,7 +1380,8 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                         RECEIVE_STALL_TIMEOUT.as_secs()
                     )));
                 }
-                thread::sleep(Duration::from_millis(1));
+                // No idle sleep: recv() already blocked for the transport's
+                // read timeout, avoiding Windows' ~15.6ms sleep quantization.
                 continue;
             }
             Err(error) => {
@@ -1234,6 +1495,19 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     control.reset_decision();
                 }
 
+                // Offer streaming mode on the TCP/LAN path. Must be sent
+                // before any real Resume packet: an old sender zeroes its
+                // resume offset on any non-8-byte Resume payload, so the real
+                // 8-byte Resume below has to arrive after this one to win.
+                if transport.is_relayed().is_none() {
+                    stream_offered = true;
+                    transport.send(&encode_packet(&Packet::new(
+                        PacketType::Resume,
+                        0,
+                        STREAM_MODE_MAGIC.to_vec(),
+                    ))?)?;
+                }
+
                 if resume_bytes > 0 {
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
                         direction: TransferDirection::Receive,
@@ -1266,11 +1540,13 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
             PacketType::Data => {
                 diag_data_recv = diag_data_recv.saturating_add(1);
                 let controls = receiver.receive_data_packet(packet)?;
-                for control in controls {
-                    if control.packet_type == PacketType::Ack {
-                        diag_acks_sent = diag_acks_sent.saturating_add(1);
+                if !streaming {
+                    for control in controls {
+                        if control.packet_type == PacketType::Ack {
+                            diag_acks_sent = diag_acks_sent.saturating_add(1);
+                        }
+                        transport.send(&encode_packet(&control)?)?;
                     }
-                    transport.send(&encode_packet(&control)?)?;
                 }
 
                 peak_receiver_buffered =
@@ -1288,6 +1564,23 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     bytes_since_checkpoint =
                         bytes_since_checkpoint.saturating_add(batch_bytes);
                     progress_dirty = true;
+
+                    // Streaming mode: one cumulative ACK per interval. Its
+                    // sequence number acknowledges everything delivered so
+                    // far (next_expected - 1 is the last contiguous packet).
+                    if streaming {
+                        bytes_since_stream_ack =
+                            bytes_since_stream_ack.saturating_add(batch_bytes);
+                        if bytes_since_stream_ack >= STREAM_ACK_INTERVAL_BYTES {
+                            bytes_since_stream_ack = 0;
+                            diag_acks_sent = diag_acks_sent.saturating_add(1);
+                            transport.send(&encode_packet(&Packet::new(
+                                PacketType::Ack,
+                                receiver.next_expected().saturating_sub(1),
+                                Vec::new(),
+                            ))?)?;
+                        }
+                    }
 
                     if let Some(cp) = checkpoint.as_mut() {
                         cp.update(receiver.next_expected(), bytes_received);
@@ -1329,6 +1622,18 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 if let Some(file) = file.as_mut() {
                     file.flush()?;
                 }
+                // Streaming mode: the sender holds its connection open until
+                // every byte is acknowledged, and the file tail is usually
+                // shorter than the ACK interval — always emit the final
+                // cumulative ACK here.
+                if streaming && receiver.next_expected() > 0 {
+                    diag_acks_sent = diag_acks_sent.saturating_add(1);
+                    transport.send(&encode_packet(&Packet::new(
+                        PacketType::Ack,
+                        receiver.next_expected() - 1,
+                        Vec::new(),
+                    ))?)?;
+                }
                 if progress_dirty {
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
                         direction: TransferDirection::Receive,
@@ -1352,7 +1657,18 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 }));
                 return Err(AppError::Rejected(rejection_message(&reason)));
             }
-            PacketType::Resume => {}
+            PacketType::Resume => {
+                // Sender's confirmation of the streaming-mode offer. Anything
+                // else in a mid-transfer Resume is ignored, as it always was.
+                if stream_offered && !streaming && packet.payload == STREAM_MODE_MAGIC {
+                    streaming = true;
+                    sink.emit(PlenumEvent::Log {
+                        level: LogLevel::Info,
+                        message: "DIAG recv: streaming mode enabled (cumulative ACKs over TCP)"
+                            .to_string(),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -1447,9 +1763,10 @@ fn wait_for_accept<T: Transport, S: EventSink>(
     control: &SessionControl,
     sink: &mut S,
     direction: TransferDirection,
-) -> Result<(u32, u64, Option<String>), AppError> {
+) -> Result<(u32, u64, Option<String>, bool), AppError> {
     let deadline = Instant::now() + ACCEPT_WAIT_TIMEOUT;
     let mut resume_bytes = 0u64;
+    let mut receiver_streams = false;
     loop {
         if control.is_cancelled() {
             let _ = transport.send(&encode_packet(&Packet::new(
@@ -1476,16 +1793,21 @@ fn wait_for_accept<T: Transport, S: EventSink>(
                             packet.sequence_no,
                             resume_bytes,
                             parse_accept_payload(&packet.payload),
+                            receiver_streams,
                         ));
                     }
                     PacketType::Resume => {
-                        resume_bytes = if packet.payload.len() == 8 {
-                            let mut bytes = [0u8; 8];
-                            bytes.copy_from_slice(&packet.payload);
-                            u64::from_be_bytes(bytes)
+                        if packet.payload == STREAM_MODE_MAGIC {
+                            receiver_streams = true;
                         } else {
-                            0
-                        };
+                            resume_bytes = if packet.payload.len() == 8 {
+                                let mut bytes = [0u8; 8];
+                                bytes.copy_from_slice(&packet.payload);
+                                u64::from_be_bytes(bytes)
+                            } else {
+                                0
+                            };
+                        }
                     }
                     // The receiver declined, rejected the PIN, or cancelled.
                     PacketType::Close => {
@@ -1633,6 +1955,17 @@ mod tests {
         bad.extend_from_slice(&100u16.to_be_bytes());
         bad.extend_from_slice(b"short");
         assert!(parse_start_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn stream_magic_never_parses_as_resume_offset() {
+        // Old senders treat any 8-byte Resume payload as a resume offset and
+        // zero it otherwise; the capability marker must never be 8 bytes or a
+        // legacy peer would seek mid-file.
+        assert_ne!(STREAM_MODE_MAGIC.len(), 8);
+        // And it must differ from every real resume payload by construction:
+        // real payloads are exactly 8 bytes (u64::to_be_bytes).
+        assert!(STREAM_MODE_MAGIC.len() > 8);
     }
 
     #[test]
