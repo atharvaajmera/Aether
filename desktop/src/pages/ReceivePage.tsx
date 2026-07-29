@@ -203,7 +203,7 @@ const ReceivePage: React.FC = () => {
         // Quick-save keeps auto-accept; otherwise the accept dialog gates.
         auto_accept: settings.receive.quickSave,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
-        options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
+        options: { chunk_size: 262144, window_size: 64, timeout_ticks: 15000 }
       };
 
       try {

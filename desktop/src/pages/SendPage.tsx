@@ -192,7 +192,7 @@ const SendPage: React.FC = () => {
         address: peer.address,
         discovery_token: peer.token,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
-        options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
+        options: { chunk_size: 262144, window_size: 64, timeout_ticks: 15000 }
       };
       const result = await invoke<TransferSummary>("send_file_command", { request: req });
       console.log("Send completed:", result);
