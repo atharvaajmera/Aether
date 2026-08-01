@@ -8,6 +8,7 @@ pub enum TransportError {
     BufferFull { capacity: usize, requested: usize },
     FrameTooLarge { len: usize, max: usize },
     Io { message: String },
+    DeadPath,
 }
 
 impl fmt::Display for TransportError {
@@ -25,6 +26,10 @@ impl fmt::Display for TransportError {
                 write!(f, "transport frame is too large: {len} bytes, max {max}")
             }
             Self::Io { message } => write!(f, "transport I/O error: {message}"),
+            Self::DeadPath => write!(
+                f,
+                "network path is dead: data submitted but nothing ever received back"
+            ),
         }
     }
 }

@@ -27,6 +27,7 @@ pub struct RtcTransport {
     diag_rx: std_mpsc::Receiver<String>,
     runtime: Option<BackgroundRuntime>,
     relayed: Arc<AtomicBool>,
+    dead_pair: Arc<AtomicBool>,
     closed: bool,
 }
 
@@ -39,6 +40,7 @@ enum ConnectOutcome {
         inbound_rx: std_mpsc::Receiver<Vec<u8>>,
         diag_rx: std_mpsc::Receiver<String>,
         relayed: Arc<AtomicBool>,
+        dead_pair: Arc<AtomicBool>,
     },
     Failed(RtcError),
 }
@@ -58,6 +60,7 @@ impl RtcTransport {
             ice_servers,
             connect_timeout,
             true,
+            false,
             None,
         )
     }
@@ -76,6 +79,7 @@ impl RtcTransport {
             ice_servers,
             connect_timeout,
             false,
+            false,
             None,
         )
     }
@@ -86,6 +90,7 @@ impl RtcTransport {
         my_peer_id: &str,
         ice_servers: Vec<IceServer>,
         connect_timeout: Duration,
+        force_relay: bool,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, RtcError> {
         Self::connect(
@@ -95,6 +100,7 @@ impl RtcTransport {
             ice_servers,
             connect_timeout,
             true,
+            force_relay,
             Some(cancel),
         )
     }
@@ -106,6 +112,7 @@ impl RtcTransport {
         my_peer_id: &str,
         ice_servers: Vec<IceServer>,
         connect_timeout: Duration,
+        force_relay: bool,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, RtcError> {
         Self::connect(
@@ -115,6 +122,7 @@ impl RtcTransport {
             ice_servers,
             connect_timeout,
             false,
+            force_relay,
             Some(cancel),
         )
     }
@@ -126,6 +134,7 @@ impl RtcTransport {
         ice_servers: Vec<IceServer>,
         connect_timeout: Duration,
         is_offerer: bool,
+        force_relay: bool,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Self, RtcError> {
         let relay_url = relay_url.to_string();
@@ -136,9 +145,9 @@ impl RtcTransport {
 
         let runtime = BackgroundRuntime::spawn("plenum-rtc", move || async move {
             let connected = if is_offerer {
-                run_offerer(&relay_url, &session_id, &my_peer_id, ice_servers).await
+                run_offerer(&relay_url, &session_id, &my_peer_id, ice_servers, force_relay).await
             } else {
-                run_answerer(&relay_url, &session_id, &my_peer_id, ice_servers).await
+                run_answerer(&relay_url, &session_id, &my_peer_id, ice_servers, force_relay).await
             };
 
             let ConnectedChannel {
@@ -148,6 +157,7 @@ impl RtcTransport {
                 diag_tx,
                 diag_rx,
                 relayed,
+                dead_pair,
             } = match connected {
                 Ok(connected) => connected,
                 Err(error) => {
@@ -166,6 +176,7 @@ impl RtcTransport {
                     inbound_rx,
                     diag_rx,
                     relayed,
+                    dead_pair,
                 })
                 .is_err()
             {
@@ -263,6 +274,7 @@ impl RtcTransport {
                 inbound_rx,
                 diag_rx,
                 relayed,
+                dead_pair,
             } => Ok(Self {
                 inbound_rx,
                 outbound_tx,
@@ -270,6 +282,7 @@ impl RtcTransport {
                 diag_rx,
                 runtime: Some(runtime),
                 relayed,
+                dead_pair,
                 closed: false,
             }),
             ConnectOutcome::Failed(error) => {
@@ -285,6 +298,9 @@ impl Transport for RtcTransport {
         if self.closed {
             return Err(TransportError::Closed);
         }
+        if self.dead_pair.load(Ordering::Relaxed) {
+            return Err(TransportError::DeadPath);
+        }
         self.outbound_tx
             .blocking_send(bytes.to_vec())
             .map_err(|_| TransportError::Closed)
@@ -293,6 +309,9 @@ impl Transport for RtcTransport {
     fn recv(&mut self) -> TransportResult<Option<Vec<u8>>> {
         if self.closed {
             return Err(TransportError::Closed);
+        }
+        if self.dead_pair.load(Ordering::Relaxed) {
+            return Err(TransportError::DeadPath);
         }
         match self
             .inbound_rx

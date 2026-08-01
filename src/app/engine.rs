@@ -22,9 +22,11 @@ use crate::discovery::{Beacon, PairingToken};
 use crate::flow::{ReceiverWindow, SenderWindow};
 use crate::protocol::{Packet, PacketType, encode_packet, parse_packet};
 use crate::rtc::RtcTransport;
-use crate::signaling::{RoutedSignal, SignalMessage, SignalingState};
+use crate::signaling::{IceServer, RoutedSignal, SignalMessage, SignalingState};
 use crate::stream::{ResumeCheckpoint, chunk_bytes};
-use crate::transport::{MemoryTransport, MemoryTransportConfig, TcpTransport, Transport};
+use crate::transport::{
+    MemoryTransport, MemoryTransportConfig, TcpTransport, Transport, TransportError,
+};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -52,6 +54,14 @@ const STREAM_ACK_INTERVAL_BYTES: u64 = 2 * 1024 * 1024;
 const STREAM_RECV_POLL_BYTES: u64 = 1024 * 1024;
 
 const RTC_MAX_CHUNK_SIZE: usize = 32 * 1024;
+
+/// Delays before the single forced-TURN-relay retry after a dead path or
+/// connect timeout. Staggered by role on purpose: the receiver (answerer)
+/// rejoins the session first and is ready to answer by the time the sender
+/// (offerer) rejoins and sends its offer. Both delays also give the relay
+/// server time to process the previous connections' disconnects.
+const RELAY_RETRY_DELAY_SEND: Duration = Duration::from_secs(5);
+const RELAY_RETRY_DELAY_RECEIVE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
 pub struct PlenumCore {
@@ -146,6 +156,39 @@ impl PlenumCore {
     ) -> Result<TransferSummary, AppError> {
         validate_send_remote_request(&request)?;
         request.options.chunk_size = request.options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
+        ensure_turn_server(
+            &mut request.ice_servers,
+            &request.relay_server_url,
+            &request.my_peer_id,
+            sink,
+        );
+
+        let first = self.send_file_remote_attempt(&request, sink, false);
+        let Err(error) = &first else {
+            return first;
+        };
+        if !should_retry_via_relay(error, &request.ice_servers) || self.control.is_cancelled() {
+            return first;
+        }
+        sink.emit(PlenumEvent::Log {
+            level: LogLevel::Warn,
+            message: format!(
+                "DIAG rtc: send failed on dead/timed-out path ({error}); retrying once via forced TURN relay"
+            ),
+        });
+        thread::sleep(RELAY_RETRY_DELAY_SEND);
+        if self.control.is_cancelled() {
+            return first;
+        }
+        self.send_file_remote_attempt(&request, sink, true)
+    }
+
+    fn send_file_remote_attempt<S: EventSink>(
+        &mut self,
+        request: &SendRemoteRequest,
+        sink: &mut S,
+        force_relay: bool,
+    ) -> Result<TransferSummary, AppError> {
         let started_at = Instant::now();
         let mut file = File::open(&request.file_path)?;
         let file_size = file.metadata()?.len();
@@ -168,6 +211,7 @@ impl PlenumCore {
             &request.my_peer_id,
             request.ice_servers.clone(),
             Duration::from_secs(request.connect_timeout_secs),
+            force_relay,
             self.control.cancel_flag(),
         )
         .map_err(|error| {
@@ -357,6 +401,39 @@ impl PlenumCore {
     ) -> Result<TransferSummary, AppError> {
         validate_receive_remote_request(&request)?;
         request.options.chunk_size = request.options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
+        ensure_turn_server(
+            &mut request.ice_servers,
+            &request.relay_server_url,
+            &request.my_peer_id,
+            sink,
+        );
+
+        let first = self.receive_file_remote_attempt(&request, sink, false);
+        let Err(error) = &first else {
+            return first;
+        };
+        if !should_retry_via_relay(error, &request.ice_servers) || self.control.is_cancelled() {
+            return first;
+        }
+        sink.emit(PlenumEvent::Log {
+            level: LogLevel::Warn,
+            message: format!(
+                "DIAG rtc: receive failed on dead/timed-out path ({error}); retrying once via forced TURN relay"
+            ),
+        });
+        thread::sleep(RELAY_RETRY_DELAY_RECEIVE);
+        if self.control.is_cancelled() {
+            return first;
+        }
+        self.receive_file_remote_attempt(&request, sink, true)
+    }
+
+    fn receive_file_remote_attempt<S: EventSink>(
+        &mut self,
+        request: &ReceiveRemoteRequest,
+        sink: &mut S,
+        force_relay: bool,
+    ) -> Result<TransferSummary, AppError> {
         create_dir_all(&request.output_dir)?;
         let started_at = Instant::now();
         let control = self.control.clone();
@@ -374,6 +451,7 @@ impl PlenumCore {
             &request.my_peer_id,
             request.ice_servers.clone(),
             Duration::from_secs(request.connect_timeout_secs),
+            force_relay,
             control.cancel_flag(),
         )
         .map_err(|error| {
@@ -1836,6 +1914,53 @@ fn rejection_message(reason: &str) -> String {
     }
 }
 
+/// Ensures the ICE server list carries a TURN entry before a remote transfer.
+fn has_turn_server(ice_servers: &[IceServer]) -> bool {
+    ice_servers.iter().any(|server| {
+        server
+            .urls
+            .iter()
+            .any(|u| u.starts_with("turn:") || u.starts_with("turns:"))
+    })
+}
+
+fn should_retry_via_relay(error: &AppError, ice_servers: &[IceServer]) -> bool {
+    let retryable = matches!(
+        error,
+        AppError::Transport(TransportError::DeadPath)
+            | AppError::Rtc(crate::rtc::RtcError::Timeout)
+    );
+    retryable && has_turn_server(ice_servers)
+}
+
+fn ensure_turn_server<S: EventSink>(
+    ice_servers: &mut Vec<IceServer>,
+    relay_server_url: &str,
+    my_peer_id: &str,
+    sink: &mut S,
+) {
+    if has_turn_server(ice_servers) {
+        return;
+    }
+    match crate::rtc::turn::fetch_turn_credentials_blocking(relay_server_url, my_peer_id) {
+        Some(server) => {
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Info,
+                message: "DIAG rtc: no TURN server in request; fetched credentials via core fallback path"
+                    .to_string(),
+            });
+            ice_servers.push(server);
+        }
+        None => {
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Warn,
+                message: "DIAG rtc: no TURN server available (fetch failed); proceeding STUN-only"
+                    .to_string(),
+            });
+        }
+    }
+}
+
 /// Maps an RTC connect failure to an app error, emitting the `Cancelled`
 /// event when the failure was a local cancel rather than a network problem.
 fn rtc_connect_error<S: EventSink>(
@@ -1975,5 +2100,36 @@ mod tests {
             parse_accept_payload("MacBook Pro".as_bytes()),
             Some("MacBook Pro".to_string())
         );
+    }
+
+    #[test]
+    fn relay_retry_only_for_dead_path_or_timeout_with_turn_available() {
+        let stun_only = vec![IceServer::new(vec!["stun:stun.example.com:3478".into()])];
+        let with_turn = vec![
+            IceServer::new(vec!["stun:stun.example.com:3478".into()]),
+            IceServer::with_credentials(
+                vec!["turn:turn.example.com:3478?transport=udp".into()],
+                "user",
+                "secret",
+            ),
+        ];
+
+        let dead_path = AppError::Transport(TransportError::DeadPath);
+        let timeout = AppError::Rtc(crate::rtc::RtcError::Timeout);
+        let cancelled = AppError::Cancelled;
+        let rejected = AppError::Rejected("declined".into());
+        let closed = AppError::Transport(TransportError::Closed);
+
+        assert!(should_retry_via_relay(&dead_path, &with_turn));
+        assert!(should_retry_via_relay(&timeout, &with_turn));
+
+        // No TURN server: forcing relay-only ICE cannot produce candidates.
+        assert!(!should_retry_via_relay(&dead_path, &stun_only));
+        assert!(!should_retry_via_relay(&timeout, &stun_only));
+
+        // Non-path failures must never trigger a retry.
+        assert!(!should_retry_via_relay(&cancelled, &with_turn));
+        assert!(!should_retry_via_relay(&rejected, &with_turn));
+        assert!(!should_retry_via_relay(&closed, &with_turn));
     }
 }

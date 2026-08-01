@@ -27,27 +27,87 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::stats::StatsReportType;
 
-use crate::rtc::config::to_rtc_configuration;
 use crate::rtc::error::RtcError;
 use crate::signaling::{IceServer, SignalMessage};
 
-/// How long to keep the signaling WebSocket alive after the local data channel
-/// opens. The local side opening does NOT mean the remote side has finished
-/// ICE: trickle candidates can still be in flight in both directions, and
-/// tearing the socket down here loses them — leaving the remote peer
-/// permanently half-open (it never completes a usable pair, never opens its
-/// data channel, and the transfer sits at 0%).
 const SIGNALING_LINGER: Duration = Duration::from_secs(15);
 
-/// Everything the transport needs once negotiation has produced an open data
-/// channel: the peer connection (kept alive for the transport's lifetime, needed
-/// for a clean `close()`), the data channel itself, a receiver fed by the data
-/// channel's `on_message` callback, and a diagnostics channel pair (`diag_tx`
-/// still usable by the caller for its own post-connect logging, e.g. data
-/// channel send failures; `diag_rx` drained by `RtcTransport::poll_diagnostics`).
+const WS_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect_ws_with_fallback(
+    relay_url: &str,
+    diag_tx: &std::sync::mpsc::Sender<String>,
+    role: &'static str,
+) -> Result<(WsStream, bool), RtcError> {
+    let direct_error = match tokio::time::timeout(
+        WS_CONNECT_ATTEMPT_TIMEOUT,
+        tokio_tungstenite::connect_async(relay_url),
+    )
+    .await
+    {
+        Ok(Ok((ws_stream, _response))) => return Ok((ws_stream, false)),
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => format!(
+            "timed out after {}s",
+            WS_CONNECT_ATTEMPT_TIMEOUT.as_secs()
+        ),
+    };
+
+    if !crate::rtc::resolve::fallback_applies(relay_url) {
+        return Err(RtcError::WebSocket(direct_error));
+    }
+
+    let _ = diag_tx.send(format!(
+        "DIAG {role}: relay connect via DNS failed ({direct_error}); retrying via fallback IP {}",
+        crate::rtc::resolve::RELAY_FALLBACK_IP
+    ));
+
+    let parsed = url::Url::parse(relay_url)
+        .map_err(|error| RtcError::WebSocket(format!("invalid relay url: {error}")))?;
+    let port = parsed.port().unwrap_or(match parsed.scheme() {
+        "wss" | "https" => 443,
+        _ => 80,
+    });
+
+    let tcp = tokio::time::timeout(
+        WS_CONNECT_ATTEMPT_TIMEOUT,
+        tokio::net::TcpStream::connect((crate::rtc::resolve::RELAY_FALLBACK_IP, port)),
+    )
+    .await
+    .map_err(|_| {
+        RtcError::WebSocket(format!(
+            "relay connect failed via DNS ({direct_error}) and fallback IP TCP connect timed out"
+        ))
+    })?
+    .map_err(|error| {
+        RtcError::WebSocket(format!(
+            "relay connect failed via DNS ({direct_error}) and via fallback IP: {error}"
+        ))
+    })?;
+    let _ = tcp.set_nodelay(true);
+
+    let (ws_stream, _response) = tokio::time::timeout(
+        WS_CONNECT_ATTEMPT_TIMEOUT,
+        tokio_tungstenite::client_async_tls_with_config(relay_url, tcp, None, None),
+    )
+    .await
+    .map_err(|_| RtcError::WebSocket("fallback IP TLS/WebSocket handshake timed out".into()))?
+    .map_err(|error| {
+        RtcError::WebSocket(format!("fallback IP TLS/WebSocket handshake failed: {error}"))
+    })?;
+
+    let _ = diag_tx.send(format!(
+        "DIAG {role}: connected to relay via fallback IP (DNS sinkhole workaround active)"
+    ));
+    Ok((ws_stream, true))
+}
+
 pub struct ConnectedChannel {
     pub peer_connection: Arc<RTCPeerConnection>,
-    pub data_channel: Arc<RTCDataChannel>,
+    pub data_channel: Arc<RTCDataChannel>,z
     pub inbound_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     pub diag_tx: std::sync::mpsc::Sender<String>,
     pub diag_rx: std::sync::mpsc::Receiver<String>,
@@ -55,6 +115,7 @@ pub struct ConnectedChannel {
     /// Updated by the stats poller (ICE can re-nominate mid-transfer), read by
     /// `RtcTransport::is_relayed`.
     pub relayed: Arc<AtomicBool>,
+    pub dead_pair: Arc<AtomicBool>,
 }
 
 fn build_api() -> Result<webrtc::api::API, RtcError> {
@@ -279,14 +340,22 @@ fn wire_state_logging(
     ));
 }
 
+/// Consecutive 2-second polls in which the nominated pair must show data
+/// submitted but zero bytes received before the path is declared dead. Three
+/// polls (~6s) is long enough to survive nomination churn right after
+/// connect, and far faster than the 30-45s transfer stall watchdogs.
+const DEAD_PAIR_CONSECUTIVE_POLLS: u32 = 3;
+
 fn spawn_stats_poller(
     peer_connection: Arc<RTCPeerConnection>,
     diag_tx: std::sync::mpsc::Sender<String>,
     role: &'static str,
     relayed: Arc<AtomicBool>,
+    dead_pair: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
+        let mut zero_recv_polls: u32 = 0;
         loop {
             interval.tick().await;
 
@@ -334,6 +403,26 @@ fn spawn_stats_poller(
                 || candidate_type(&pair.remote_candidate_id) == Some(CandidateType::Relay);
             relayed.store(is_relayed, Ordering::Relaxed);
 
+            // Dead-path verdict: we are pushing bytes into the pair but have
+            // never received a single byte back. A healthy pair always shows
+            // inbound traffic within a poll or two (SCTP acks, DCEP
+            // handshake), so several consecutive zero-received polls means
+            // the pair blackholes data despite its Succeeded state.
+            if pair.bytes_sent > 0 && pair.bytes_received == 0 {
+                zero_recv_polls += 1;
+                if zero_recv_polls >= DEAD_PAIR_CONSECUTIVE_POLLS
+                    && !dead_pair.load(Ordering::Relaxed)
+                {
+                    dead_pair.store(true, Ordering::Relaxed);
+                    let _ = diag_tx.send(format!(
+                        "DIAG {role}: nominated pair is DEAD ({} polls with bytes_sent={} and zero bytes received) — flagging for relay retry",
+                        zero_recv_polls, pair.bytes_sent
+                    ));
+                }
+            } else {
+                zero_recv_polls = 0;
+            }
+
             let local = describe_candidate(&pair.local_candidate_id);
             let remote = describe_candidate(&pair.remote_candidate_id);
 
@@ -355,10 +444,19 @@ pub async fn run_offerer(
     session_id: &str,
     my_peer_id: &str,
     ice_servers: Vec<IceServer>,
+    force_relay: bool,
 ) -> Result<ConnectedChannel, RtcError> {
-    let (ws_stream, _response) = tokio_tungstenite::connect_async(relay_url)
-        .await
-        .map_err(|error| RtcError::WebSocket(error.to_string()))?;
+    let (diag_tx, diag_rx) = std::sync::mpsc::channel::<String>();
+    let (ws_stream, used_fallback_ip) =
+        connect_ws_with_fallback(relay_url, &diag_tx, "offerer").await?;
+    // Fallback active means DNS for the relay host is broken on this network;
+    // the ICE agent resolves STUN/TURN hostnames through that same DNS, so
+    // point them at the IP too.
+    let ice_servers = if used_fallback_ip {
+        crate::rtc::resolve::rewrite_ice_servers_to_fallback_ip(&ice_servers)
+    } else {
+        ice_servers
+    };
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
     send_ws_message(
@@ -371,7 +469,13 @@ pub async fn run_offerer(
     .await?;
 
     let api = build_api()?;
-    let configuration: RTCConfiguration = to_rtc_configuration(&ice_servers);
+    let configuration: RTCConfiguration =
+        crate::rtc::config::to_rtc_configuration_with_policy(&ice_servers, force_relay);
+    if force_relay {
+        let _ = diag_tx.send(
+            "DIAG rtc: ICE restricted to TURN relay candidates for this attempt".to_string(),
+        );
+    }
     let peer_connection = Arc::new(
         api.new_peer_connection(configuration)
             .await
@@ -379,7 +483,6 @@ pub async fn run_offerer(
     );
 
     let (inbound_tx, inbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    let (diag_tx, diag_rx) = std::sync::mpsc::channel::<String>();
     let (open_tx, mut open_rx) = mpsc::unbounded_channel::<()>();
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<SignalMessage>();
     let remote_peer_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
@@ -505,11 +608,13 @@ pub async fn run_offerer(
         .ok_or_else(|| RtcError::PeerConnection("data channel was never created".into()))?;
 
     let relayed = Arc::new(AtomicBool::new(false));
+    let dead_pair = Arc::new(AtomicBool::new(false));
     spawn_stats_poller(
         Arc::clone(&peer_connection),
         diag_tx.clone(),
         "offerer",
         Arc::clone(&relayed),
+        Arc::clone(&dead_pair),
     );
 
     Ok(ConnectedChannel {
@@ -519,6 +624,7 @@ pub async fn run_offerer(
         diag_tx,
         diag_rx,
         relayed,
+        dead_pair,
     })
 }
 
@@ -527,10 +633,19 @@ pub async fn run_answerer(
     session_id: &str,
     my_peer_id: &str,
     ice_servers: Vec<IceServer>,
+    force_relay: bool,
 ) -> Result<ConnectedChannel, RtcError> {
-    let (ws_stream, _response) = tokio_tungstenite::connect_async(relay_url)
-        .await
-        .map_err(|error| RtcError::WebSocket(error.to_string()))?;
+    let (diag_tx, diag_rx) = std::sync::mpsc::channel::<String>();
+    let (ws_stream, used_fallback_ip) =
+        connect_ws_with_fallback(relay_url, &diag_tx, "answerer").await?;
+    // Fallback active means DNS for the relay host is broken on this network;
+    // the ICE agent resolves STUN/TURN hostnames through that same DNS, so
+    // point them at the IP too.
+    let ice_servers = if used_fallback_ip {
+        crate::rtc::resolve::rewrite_ice_servers_to_fallback_ip(&ice_servers)
+    } else {
+        ice_servers
+    };
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
     send_ws_message(
@@ -543,7 +658,13 @@ pub async fn run_answerer(
     .await?;
 
     let api = build_api()?;
-    let configuration: RTCConfiguration = to_rtc_configuration(&ice_servers);
+    let configuration: RTCConfiguration =
+        crate::rtc::config::to_rtc_configuration_with_policy(&ice_servers, force_relay);
+    if force_relay {
+        let _ = diag_tx.send(
+            "DIAG rtc: ICE restricted to TURN relay candidates for this attempt".to_string(),
+        );
+    }
     let peer_connection = Arc::new(
         api.new_peer_connection(configuration)
             .await
@@ -551,7 +672,6 @@ pub async fn run_answerer(
     );
 
     let (inbound_tx, inbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    let (diag_tx, diag_rx) = std::sync::mpsc::channel::<String>();
     let (open_tx, mut open_rx) = mpsc::unbounded_channel::<()>();
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<SignalMessage>();
     let remote_peer_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
@@ -689,11 +809,13 @@ pub async fn run_answerer(
         .ok_or_else(|| RtcError::PeerConnection("data channel was never received".into()))?;
 
     let relayed = Arc::new(AtomicBool::new(false));
+    let dead_pair = Arc::new(AtomicBool::new(false));
     spawn_stats_poller(
         Arc::clone(&peer_connection),
         diag_tx.clone(),
         "answerer",
         Arc::clone(&relayed),
+        Arc::clone(&dead_pair),
     );
 
     Ok(ConnectedChannel {
@@ -703,5 +825,6 @@ pub async fn run_answerer(
         diag_tx,
         diag_rx,
         relayed,
+        dead_pair,
     })
 }
