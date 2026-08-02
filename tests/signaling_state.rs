@@ -196,3 +196,60 @@ fn rejects_invalid_server_generated_inbound_message() {
         )
     );
 }
+
+#[test]
+fn rejoining_same_session_is_allowed_and_renotifies_others() {
+    let mut state = SignalingState::new();
+    for peer_id in ["alice", "bob"] {
+        state
+            .handle(SignalMessage::JoinSession {
+                peer_id: peer_id.into(),
+                session_id: "room-4".into(),
+            })
+            .expect("join should succeed");
+    }
+
+    let notifications = state
+        .handle(SignalMessage::JoinSession {
+            peer_id: "alice".into(),
+            session_id: "room-4".into(),
+        })
+        .expect("rejoin of the same session should succeed");
+
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(
+        notifications[0],
+        RoutedSignal {
+            recipient_peer_id: "bob".into(),
+            message: SignalMessage::PeerJoined {
+                peer_id: "alice".into(),
+                session_id: "room-4".into(),
+            },
+        }
+    );
+    assert_eq!(state.session_of("alice"), Some("room-4"));
+    assert_eq!(state.session_of("bob"), Some("room-4"));
+}
+
+#[test]
+fn joining_a_different_session_while_attached_still_fails() {
+    let mut state = SignalingState::new();
+    state
+        .handle(SignalMessage::JoinSession {
+            peer_id: "alice".into(),
+            session_id: "room-5".into(),
+        })
+        .expect("join should succeed");
+
+    let err = state
+        .handle(SignalMessage::JoinSession {
+            peer_id: "alice".into(),
+            session_id: "room-6".into(),
+        })
+        .expect_err("switching sessions without leaving should fail");
+
+    assert_eq!(
+        err,
+        SignalingError::InvalidSignal("peer is already attached to session room-5".into())
+    );
+}

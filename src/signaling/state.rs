@@ -110,21 +110,17 @@ impl SignalingState {
         }
 
         if let Some(current_session) = self.peer_sessions.get(&peer_id) {
-            if current_session == &session_id {
-                return Err(SignalingError::PeerAlreadyInSession {
-                    peer_id,
-                    session_id,
-                });
+            if current_session != &session_id {
+                return Err(SignalingError::InvalidSignal(format!(
+                    "peer is already attached to session {current_session}"
+                )));
             }
-
-            return Err(SignalingError::InvalidSignal(format!(
-                "peer is already attached to session {current_session}"
-            )));
         }
 
         let peers = self.sessions.entry(session_id.clone()).or_default();
         let notifications = peers
             .iter()
+            .filter(|existing| *existing != &peer_id)
             .cloned()
             .map(|recipient_peer_id| RoutedSignal {
                 recipient_peer_id,
