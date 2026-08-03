@@ -107,7 +107,7 @@ async fn connect_ws_with_fallback(
 
 pub struct ConnectedChannel {
     pub peer_connection: Arc<RTCPeerConnection>,
-    pub data_channel: Arc<RTCDataChannel>,z
+    pub data_channel: Arc<RTCDataChannel>,
     pub inbound_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     pub diag_tx: std::sync::mpsc::Sender<String>,
     pub diag_rx: std::sync::mpsc::Receiver<String>,
