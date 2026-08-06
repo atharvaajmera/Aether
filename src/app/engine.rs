@@ -84,7 +84,6 @@ impl PlenumCore {
         sink: &mut S,
     ) -> Result<crate::app::types::TransferSummary, AppError> {
         validate_send_request(&request)?;
-        let started_at = Instant::now();
         let mut file = File::open(&request.file_path)?;
         let file_size = file.metadata()?.len();
         let file_name = request
@@ -142,7 +141,6 @@ impl PlenumCore {
             &file_name,
             &request.options,
             Some(address),
-            started_at,
             &self.control,
             request.discovery_token.as_deref(),
             request.device_name.as_deref(),
@@ -189,7 +187,6 @@ impl PlenumCore {
         sink: &mut S,
         force_relay: bool,
     ) -> Result<TransferSummary, AppError> {
-        let started_at = Instant::now();
         let mut file = File::open(&request.file_path)?;
         let file_size = file.metadata()?.len();
         let file_name = request
@@ -232,7 +229,6 @@ impl PlenumCore {
             &file_name,
             &request.options,
             Some(request.session_id.clone()),
-            started_at,
             &self.control,
             None,
             request.device_name.as_deref(),
@@ -311,7 +307,6 @@ impl PlenumCore {
         sink: &mut S,
     ) -> Result<crate::app::types::TransferSummary, AppError> {
         loop {
-            let started_at = Instant::now();
             let stream = loop {
                 if control.is_cancelled() {
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
@@ -386,7 +381,6 @@ impl PlenumCore {
                 &request.output_dir,
                 &request.options,
                 peer,
-                started_at,
                 control,
                 request.auto_accept,
                 request.device_name.as_deref(),
@@ -435,7 +429,6 @@ impl PlenumCore {
         force_relay: bool,
     ) -> Result<TransferSummary, AppError> {
         create_dir_all(&request.output_dir)?;
-        let started_at = Instant::now();
         let control = self.control.clone();
         control.reset_decision();
 
@@ -470,7 +463,6 @@ impl PlenumCore {
             &request.output_dir,
             &request.options,
             request.session_id.clone(),
-            started_at,
             &control,
             request.auto_accept,
             request.device_name.as_deref(),
@@ -881,7 +873,6 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     file_name: &str,
     options: &crate::app::types::TransferOptions,
     peer_label: Option<String>,
-    started_at: Instant,
     control: &SessionControl,
     pin: Option<&str>,
     device_name: Option<&str>,
@@ -913,6 +904,8 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     }));
     let (mut sequence_no, resume_bytes, receiver_name, receiver_streams) =
         wait_for_accept(transport, control, sink, TransferDirection::Send)?;
+
+    let started_at = Instant::now();
 
     if resume_bytes > 0 {
         sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
@@ -1352,12 +1345,12 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     output_dir: &Path,
     options: &crate::app::types::TransferOptions,
     peer_label: String,
-    started_at: Instant,
     control: &SessionControl,
     auto_accept: bool,
     device_name: Option<&str>,
 ) -> Result<TransferSummary, AppError> {
     let mut receiver = ReceiverWindow::new();
+    let mut started_at = Instant::now();
     let mut file: Option<BufWriter<File>> = None;
     let mut file_name = String::from("received_file");
     let mut file_size = 0u64;
@@ -1604,6 +1597,8 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     resume_sequence,
                     device_name.map(|name| name.as_bytes().to_vec()).unwrap_or_default(),
                 ))?)?;
+
+                started_at = Instant::now();
 
                 sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
                     direction: TransferDirection::Receive,
