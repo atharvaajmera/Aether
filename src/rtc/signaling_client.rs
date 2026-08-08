@@ -445,6 +445,7 @@ pub async fn run_offerer(
     my_peer_id: &str,
     ice_servers: Vec<IceServer>,
     force_relay: bool,
+    offer_exchanged: Arc<AtomicBool>,
 ) -> Result<ConnectedChannel, RtcError> {
     let (diag_tx, diag_rx) = std::sync::mpsc::channel::<String>();
     let (ws_stream, used_fallback_ip) =
@@ -552,6 +553,9 @@ pub async fn run_offerer(
                             sdp,
                             nat: None,
                         });
+                        // Offer sent — ICE negotiation is now in progress.
+                        // The sync timeout check uses this to distinguish a
+                        offer_exchanged.store(true, Ordering::Relaxed);
 
                         // Stash the data channel handle for the caller once open.
                         pending_data_channel = Some(data_channel);
@@ -634,6 +638,7 @@ pub async fn run_answerer(
     my_peer_id: &str,
     ice_servers: Vec<IceServer>,
     force_relay: bool,
+    offer_exchanged: Arc<AtomicBool>,
 ) -> Result<ConnectedChannel, RtcError> {
     let (diag_tx, diag_rx) = std::sync::mpsc::channel::<String>();
     let (ws_stream, used_fallback_ip) =
@@ -763,6 +768,8 @@ pub async fn run_answerer(
                             to_peer_id: from_peer_id,
                             sdp: answer_sdp,
                         });
+                        // Answer sent - ICE negotiation is now in progress.
+                        offer_exchanged.store(true, Ordering::Relaxed);
                     }
                     SignalMessage::Offer { .. } => {
                         // Already negotiating/negotiated; ignore further offers.

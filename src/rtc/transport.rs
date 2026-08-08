@@ -143,11 +143,15 @@ impl RtcTransport {
 
         let (outcome_tx, outcome_rx) = std_mpsc::channel::<ConnectOutcome>();
 
+        // Shared flag
+        let offer_exchanged = Arc::new(AtomicBool::new(false));
+        let offer_exchanged_for_task = Arc::clone(&offer_exchanged);
+
         let runtime = BackgroundRuntime::spawn("plenum-rtc", move || async move {
             let connected = if is_offerer {
-                run_offerer(&relay_url, &session_id, &my_peer_id, ice_servers, force_relay).await
+                run_offerer(&relay_url, &session_id, &my_peer_id, ice_servers, force_relay, offer_exchanged_for_task).await
             } else {
-                run_answerer(&relay_url, &session_id, &my_peer_id, ice_servers, force_relay).await
+                run_answerer(&relay_url, &session_id, &my_peer_id, ice_servers, force_relay, offer_exchanged_for_task).await
             };
 
             let ConnectedChannel {
@@ -254,8 +258,14 @@ impl RtcTransport {
                         std::thread::spawn(move || runtime.join());
                         return Err(if cancelled {
                             RtcError::Cancelled
-                        } else {
+                        } else if offer_exchanged.load(Ordering::Relaxed) {
+                            // Offer/answer exchanged but ICE/DTLS never completed —
+                            // a forced-relay retry may unblock a blackholed path.
                             RtcError::Timeout
+                        } else {
+                            // Remote peer never joined the signaling session; forcing
+                            // relay cannot help, retry is useless
+                            RtcError::PeerNeverArrived
                         });
                     }
                 }
