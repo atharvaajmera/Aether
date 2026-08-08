@@ -30,6 +30,7 @@ services:
       - caddy_data:/caddy_data:ro
     command:
       - "-n"
+      - "-v"
       - "--use-auth-secret"
       - "--static-auth-secret=${TURN_SHARED_SECRET}"
       - "--realm=plenum.local"
