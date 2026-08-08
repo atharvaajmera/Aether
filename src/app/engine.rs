@@ -1922,8 +1922,14 @@ fn has_turn_server(ice_servers: &[IceServer]) -> bool {
 fn should_retry_via_relay(error: &AppError, ice_servers: &[IceServer]) -> bool {
     let retryable = matches!(
         error,
-        AppError::Transport(TransportError::DeadPath)
-            | AppError::Rtc(crate::rtc::RtcError::Timeout)
+        // ICE/DTLS timed out after offer/answer — a forced-relay retry may
+        // unblock an asymmetrically-blocked path.
+        AppError::Rtc(crate::rtc::RtcError::Timeout)
+            // Stats poller detected the active pair went dead mid-transfer.
+            | AppError::Transport(TransportError::DeadPath)
+        // RtcError::PeerNeverArrived is intentionally excluded: the remote
+        // peer never joined the signaling session so the ICE handshake never
+        // started; forcing relay-only candidates cannot help.
     );
     retryable && has_turn_server(ice_servers)
 }
@@ -1956,8 +1962,7 @@ fn ensure_turn_server<S: EventSink>(
     }
 }
 
-/// Maps an RTC connect failure to an app error, emitting the `Cancelled`
-/// event when the failure was a local cancel rather than a network problem.
+/// Maps an RTC connect failure to an app error, emitting the cancelled state
 fn rtc_connect_error<S: EventSink>(
     error: crate::rtc::RtcError,
     direction: TransferDirection,
@@ -2111,6 +2116,7 @@ mod tests {
 
         let dead_path = AppError::Transport(TransportError::DeadPath);
         let timeout = AppError::Rtc(crate::rtc::RtcError::Timeout);
+        let peer_never_arrived = AppError::Rtc(crate::rtc::RtcError::PeerNeverArrived);
         let cancelled = AppError::Cancelled;
         let rejected = AppError::Rejected("declined".into());
         let closed = AppError::Transport(TransportError::Closed);
@@ -2125,6 +2131,8 @@ mod tests {
         // Non-path failures must never trigger a retry.
         assert!(!should_retry_via_relay(&cancelled, &with_turn));
         assert!(!should_retry_via_relay(&rejected, &with_turn));
+        // PeerNeverArrived: remote never joined signaling; forcing relay again is useless
+        assert!(!should_retry_via_relay(&peer_never_arrived, &with_turn));
         assert!(!should_retry_via_relay(&closed, &with_turn));
     }
 }
