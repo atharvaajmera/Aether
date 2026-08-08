@@ -29,6 +29,6 @@ relay-server = { path = "relay-server" }
 axum = { version = "0.8", features = ["ws"] }
 
 [profile.release]
-codegen-units = 1
+codegen-units = 4
 lto = "thin"
 strip = "symbols"

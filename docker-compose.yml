@@ -8,7 +8,7 @@ services:
       RELAY_BIND_ADDR: "0.0.0.0:8080"
       RELAY_PUBLIC_URL: "wss://${CADDY_DOMAIN}/ws"
       TURN_SHARED_SECRET: "${TURN_SHARED_SECRET}"
-      TURN_URLS: "turn:${CADDY_DOMAIN}:3478?transport=udp,turn:${CADDY_DOMAIN}:3478?transport=tcp"
+      TURN_URLS: "turn:${CADDY_DOMAIN}:3478?transport=udp,turn:${CADDY_DOMAIN}:3478?transport=tcp,turns:${CADDY_DOMAIN}:5349"
       RUST_LOG: "info"
     depends_on:
       - coturn
@@ -26,6 +26,8 @@ services:
     # doesn't allow network_mode: host (e.g. some managed container
     # platforms).
     network_mode: host
+    volumes:
+      - caddy_data:/caddy_data:ro
     command:
       - "-n"
       - "--use-auth-secret"
@@ -44,6 +46,9 @@ services:
       - "--external-ip=${TURN_PUBLIC_IP}/${TURN_PRIVATE_IP}"
       - "--min-port=49152"
       - "--max-port=49452"
+      - "--tls-listening-port=5349"
+      - "--cert=/caddy_data/certificates/acme-v02.api.letsencrypt.org-directory/relay.plenumonline.me/relay.plenumonline.me.crt"   
+      - "--pkey=/caddy_data/certificates/acme-v02.api.letsencrypt.org-directory/relay.plenumonline.me/relay.plenumonline.me.key"
 
   caddy:
     image: caddy:2
