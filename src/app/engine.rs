@@ -47,6 +47,8 @@ const CHECKPOINT_SAVE_BYTES: u64 = 4 * 1024 * 1024;
 
 const RECEIVE_STALL_TIMEOUT: Duration = Duration::from_secs(45);
 
+const FINISH_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
 const STREAM_MODE_MAGIC: &[u8] = b"PLENUM_STREAM_V1";
 
 const STREAM_ACK_INTERVAL_BYTES: u64 = 2 * 1024 * 1024;
@@ -1173,6 +1175,7 @@ fn run_streaming_send_loop<T: Transport, S: EventSink>(
     let mut bytes_sent = resume_bytes;
     let mut file_done = resume_bytes >= file_size;
     let mut finish_sent = false;
+    let mut last_finish_sent = Instant::now();
     let mut last_inbound = Instant::now();
     let mut last_progress_emit = Instant::now() - PROGRESS_EMIT_INTERVAL;
     let mut bytes_since_poll: u64 = 0;
@@ -1307,6 +1310,16 @@ fn run_streaming_send_loop<T: Transport, S: EventSink>(
             if bytes_acked >= file_size {
                 break;
             }
+            if last_finish_sent.elapsed() >= FINISH_RETRY_INTERVAL {
+                last_finish_sent = Instant::now();
+                if let Ok(bytes) = encode_packet(&Packet::new(
+                    PacketType::Finish,
+                    sequence_no,
+                    Vec::new(),
+                )) {
+                    let _ = transport.send(&bytes);
+                }
+            }
             if last_inbound.elapsed() >= SEND_STALL_TIMEOUT {
                 return Err(AppError::Stalled(format!(
                     "no cumulative ACK from receiver for {}s ({} of {} bytes acknowledged)",
@@ -1371,6 +1384,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     let mut stream_offered = false;
     let mut streaming = false;
     let mut bytes_since_stream_ack = 0u64;
+    let mut finish_received = false;
 
     let mut diag_data_recv: u64 = 0;
     let mut diag_acks_sent: u64 = 0;
@@ -1717,6 +1731,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 if let Some(path) = checkpoint_path.as_ref() {
                     ResumeCheckpoint::clear(path)?;
                 }
+                finish_received = true;
                 break;
             }
             PacketType::Close => {
@@ -1752,6 +1767,15 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
             "DIAG recv: transfer loop END frames={diag_frames} data_recv={diag_data_recv} acks_sent={diag_acks_sent} bytes_recv={bytes_received}"
         ),
     });
+
+    if !finish_received && bytes_received < file_size {
+        let _ = transport.close();
+        return Err(AppError::Stalled(format!(
+            "connection closed before transfer completed ({} of {} bytes received)",
+            bytes_received,
+            file_size
+        )));
+    }
 
     let mode = transfer_mode(transport);
     let _ = transport.close();

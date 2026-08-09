@@ -12,6 +12,7 @@ use crate::transport::{Transport, TransportError, TransportResult};
 const LENGTH_PREFIX_LEN: usize = 4;
 const DEFAULT_MAX_FRAME_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_millis(5);
+const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounded connect timeout so an unreachable peer (e.g. WiFi client/AP
 /// isolation, or a receiver that never bound its listener) fails fast with a
 /// clear error instead of leaving the UI stuck on "Connecting" for the OS
@@ -57,6 +58,7 @@ impl TcpTransport {
     pub fn from_stream(stream: TcpStream) -> TransportResult<Self> {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(DEFAULT_READ_TIMEOUT))?;
+        stream.set_write_timeout(Some(DEFAULT_WRITE_TIMEOUT))?;
         Ok(Self {
             stream,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
@@ -157,9 +159,25 @@ impl Transport for TcpTransport {
         }
 
         let len = bytes.len() as u32;
-        self.stream.write_all(&len.to_be_bytes())?;
-        self.stream.write_all(bytes)?;
-        self.stream.flush()?;
+        let write_result = self
+            .stream
+            .write_all(&len.to_be_bytes())
+            .and_then(|()| self.stream.write_all(bytes))
+            .and_then(|()| self.stream.flush());
+
+        if let Err(error) = write_result {
+            // Any mid-frame write failure desyncs the length-prefixed stream, so
+            // the socket can never be reused: mark it closed. A timeout means the
+            // peer stopped draining at the TCP layer for DEFAULT_WRITE_TIMEOUT
+            // (a dead path, not mere slowness) — surface it as a clean `Closed`
+            // so the transfer loop aborts and reports failure, instead of the
+            // write blocking indefinitely with no watchdog able to run.
+            self.closed = true;
+            if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+                return Err(TransportError::Closed);
+            }
+            return Err(error.into());
+        }
         Ok(())
     }
 
