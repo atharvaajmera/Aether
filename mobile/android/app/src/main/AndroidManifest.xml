@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"/>
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <!-- Legacy storage permission for Android 9 and below, where the
          Downloads export is a direct file copy. Android 10+ uses MediaStore
          and needs no storage permission at all (scoped storage). -->

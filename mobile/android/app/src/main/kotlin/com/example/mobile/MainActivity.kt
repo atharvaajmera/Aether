@@ -1,9 +1,12 @@
 package com.example.mobile
 
 import android.content.ContentValues
+import android.content.Context
 import android.media.MediaScannerConnection
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.MediaStore
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -13,11 +16,26 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private val channelName = "plenum/media"
 
+    // Wi-Fi + CPU locks held only for the duration of a transfer. Without the
+    // high-perf Wi-Fi lock the radio parks in power-save between the sparse
+    // cumulative ACKs of a large streaming transfer, silently killing the TCP
+    // socket; the partial wake lock keeps the CPU alive if the screen sleeps.
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "acquireTransferLock" -> {
+                        acquireTransferLock()
+                        result.success(true)
+                    }
+                    "releaseTransferLock" -> {
+                        releaseTransferLock()
+                        result.success(true)
+                    }
                     "scanFile" -> {
                         val path = call.argument<String>("path")
                         if (path.isNullOrEmpty()) {
@@ -65,6 +83,43 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun acquireTransferLock() {
+        if (wifiLock == null) {
+            val wifiManager =
+                applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                @Suppress("DEPRECATION")
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wifiManager.createWifiLock(mode, "plenum:transfer")
+        }
+        wifiLock?.let { if (!it.isHeld) it.acquire() }
+
+        if (wakeLock == null) {
+            val powerManager =
+                applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "plenum:transfer"
+            )
+        }
+        wakeLock?.let { if (!it.isHeld) it.acquire(20 * 60 * 1000L /* 20 min backstop */) }
+    }
+
+    /// Releases both locks if held. Idempotent.
+    private fun releaseTransferLock() {
+        wifiLock?.let { if (it.isHeld) it.release() }
+        wakeLock?.let { if (it.isHeld) it.release() }
+    }
+
+    override fun onDestroy() {
+        // Never leak the locks if the activity is torn down mid-transfer.
+        releaseTransferLock()
+        super.onDestroy()
     }
 
     /// Copies `source` into public Downloads and returns a display string of
