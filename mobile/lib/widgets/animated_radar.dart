@@ -79,7 +79,7 @@ class _AnimatedRadarState extends State<AnimatedRadar> with SingleTickerProvider
               boxShadow: widget.isListening
                   ? [
                       BoxShadow(
-                        color: AppTheme.accentPrimary.withOpacity(0.5),
+                        color: AppTheme.accentPrimary.withValues(alpha: 0.5),
                         blurRadius: 10,
                         spreadRadius: 2,
                       )

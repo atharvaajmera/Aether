@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:mobile/src/rust/api/plenum_api.dart';
@@ -9,6 +8,7 @@ import '../services/internet_settings.dart';
 import '../theme.dart';
 import 'package:provider/provider.dart';
 import '../services/settings_service.dart';
+import '../services/transfer_lock.dart';
 
 import '../utils/transfer_status.dart';
 import '../utils/formatters.dart';
@@ -82,6 +82,7 @@ class _SendScreenState extends State<SendScreen> {
     _transferSub?.cancel();
     _autoResetTimer?.cancel();
     _roomCodeController.dispose();
+    TransferLock.release();
     super.dispose();
   }
 
@@ -312,6 +313,7 @@ class _SendScreenState extends State<SendScreen> {
       _transferActive = true;
       _showSuccess = false;
     });
+    TransferLock.acquire();
     _transferSub = startSend(
       filePath: _selectedFile!,
       peerAddress: address,
@@ -321,9 +323,11 @@ class _SendScreenState extends State<SendScreen> {
     ).listen(
       _handleTransferEvent,
       onDone: () {
+        TransferLock.release();
         if (mounted) setState(() => _transferActive = false);
       },
       onError: (e) {
+        TransferLock.release();
         if (mounted) {
           setState(() {
             _transferStatus = 'Error: $e';
@@ -375,6 +379,7 @@ class _SendScreenState extends State<SendScreen> {
         _transferActive = true;
         _showSuccess = false;
       });
+      TransferLock.acquire();
       _transferSub = startSendRemote(
         filePath: _selectedFile!,
         relayServerUrl: relayServerUrl,
@@ -387,12 +392,16 @@ class _SendScreenState extends State<SendScreen> {
       ).listen(
         _handleTransferEvent,
         onDone: () {
-          if (mounted) setState(() {
-            _isConnectingRemote = false;
-            _transferActive = false;
-          });
+          TransferLock.release();
+          if (mounted) {
+            setState(() {
+              _isConnectingRemote = false;
+              _transferActive = false;
+            });
+          }
         },
         onError: (e) {
+          TransferLock.release();
           if (mounted) {
             setState(() {
               _transferStatus = 'Error: $e';
@@ -404,6 +413,7 @@ class _SendScreenState extends State<SendScreen> {
         },
       );
     } catch (e) {
+      TransferLock.release();
       setState(() {
         _transferStatus = 'Error: $e';
         _isConnectingRemote = false;
@@ -469,73 +479,6 @@ class _SendScreenState extends State<SendScreen> {
     );
   }
 
-  void _showManualIpDialog() {
-    final TextEditingController ipController = TextEditingController();
-    final TextEditingController portController = TextEditingController(text: '8080');
-
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          backgroundColor: AppTheme.bgCard,
-          title: const Text('Connect by IP', style: TextStyle(color: AppTheme.textPrimary)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'Enter the IP address shown on the receiver\'s screen.',
-                style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: ipController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'IP Address',
-                  hintText: '192.168.1.5',
-                  border: OutlineInputBorder(),
-                  focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
-                ),
-                style: const TextStyle(color: AppTheme.textPrimary),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: portController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Port',
-                  border: OutlineInputBorder(),
-                  focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
-                ),
-                style: const TextStyle(color: AppTheme.textPrimary),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel', style: TextStyle(color: AppTheme.textSecondary)),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                final ip = ipController.text.trim();
-                final port = portController.text.trim();
-                if (ip.isNotEmpty) {
-                  final address = '$ip:$port';
-                  setState(() {
-                    _peers.add({'hostname': ip, 'address': address, 'token': 'manual'});
-                  });
-                }
-              },
-              style: ElevatedButton.styleFrom(backgroundColor: AppTheme.accentPrimary),
-              child: const Text('Add'),
-            ),
-          ],
-        );
-      },
-    );
-  }
 
   Widget _buildModeToggle() {
     return Row(

@@ -3,7 +3,7 @@ import 'package:mobile/src/rust/frb_generated.dart';
 
 import 'screens/send_screen.dart';
 import 'screens/receive_screen.dart';
-import 'screens/settings_screen.dart';
+
 import 'theme.dart';
 
 import 'package:provider/provider.dart';

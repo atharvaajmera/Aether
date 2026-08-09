@@ -24,8 +24,6 @@ class AppTheme {
         primary: accentPrimary,
         secondary: accentPill,
         surface: bgCard,
-        background: bgApp,
-        onBackground: textPrimary,
         onSurface: textPrimary,
       ),
       textTheme: GoogleFonts.interTextTheme(
@@ -50,15 +48,15 @@ class AppTheme {
       ),
       navigationBarTheme: NavigationBarThemeData(
         backgroundColor: bgSidebar,
-        indicatorColor: accentPrimary.withOpacity(0.2),
-        labelTextStyle: MaterialStateProperty.resolveWith((states) {
-          if (states.contains(MaterialState.selected)) {
+        indicatorColor: accentPrimary.withValues(alpha: 0.2),
+        labelTextStyle: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) {
             return const TextStyle(color: accentPrimary, fontSize: 12, fontWeight: FontWeight.w600);
           }
           return const TextStyle(color: textSecondary, fontSize: 12);
         }),
-        iconTheme: MaterialStateProperty.resolveWith((states) {
-          if (states.contains(MaterialState.selected)) {
+        iconTheme: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) {
             return const IconThemeData(color: accentPrimary);
           }
           return const IconThemeData(color: textSecondary);

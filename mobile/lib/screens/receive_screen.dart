@@ -9,6 +9,7 @@ import 'package:mobile/src/rust/api/plenum_api.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/receive_storage.dart';
 import '../services/internet_settings.dart';
+import '../services/transfer_lock.dart';
 import '../theme.dart';
 import '../widgets/animated_radar.dart';
 import 'package:provider/provider.dart';
@@ -84,6 +85,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
   @override
   void dispose() {
+    TransferLock.release();
     final token = _sessionToken;
     if (token != null) {
       try {
@@ -113,6 +115,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
   void _stopReceiving() {
     // Cancel Rust-side transfer loop first, then drop the Dart subscriptions.
+    TransferLock.release();
     final token = _sessionToken;
     if (token != null) {
       try {
@@ -160,6 +163,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     if (!mounted) return;
 
     final outputDir = await ReceiveStorage.outputDir();
+    if (!mounted) return;
     final settings = context.read<SettingsService>();
     final deviceName = settings.deviceName;
     final requirePin = settings.requirePin;
@@ -194,7 +198,6 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       if (event['Discovery'] != null) {
         final discEvent = event['Discovery'];
         if (discEvent['BroadcastStarted'] != null) {
-          final port = discEvent['BroadcastStarted']['port'];
           setState(() {
             _pin = discEvent['BroadcastStarted']['token'];
             _statusMessage = 'Ready to receive files';
@@ -231,11 +234,13 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         senderName: req['sender_name'],
       );
     } else if (transEvent['Cancelled'] != null) {
+      TransferLock.release();
       setState(() {
         _statusMessage = 'Transfer cancelled';
         _progress = null;
       });
     } else if (transEvent['Declined'] != null) {
+      TransferLock.release();
       final reason = transEvent['Declined']['reason'];
       setState(() {
         _statusMessage = reason == 'cancelled'
@@ -244,6 +249,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         _progress = null;
       });
     } else if (transEvent['Started'] != null) {
+      TransferLock.acquire();
       setState(() {
         _statusMessage = 'Receiving ${transEvent['Started']['file_name']}...';
         _progress = 0.0;
@@ -279,6 +285,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         }
       });
     } else if (transEvent['Completed'] != null) {
+      TransferLock.release();
       final summary = transEvent['Completed'];
       final fileName = summary['file_name'];
       final localPath = fileName != null ? '$outputDir/$fileName' : null;
@@ -712,6 +719,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 code: _roomCode!,
                 copied: _roomCodeCopied,
                 onCopy: _copyRoomCode,
+                // ignore: deprecated_member_use
                 onShare: () => Share.share('Use this code to send files on Plenum: $_roomCode'),
                 footer: 'Code valid while this screen is open',
               ),
@@ -823,6 +831,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: ElevatedButton(
+                              // ignore: deprecated_member_use
                               onPressed: () => Share.shareXFiles([XFile(_savedFilePath!)]),
                               child: const Text('Share'),
                             ),
