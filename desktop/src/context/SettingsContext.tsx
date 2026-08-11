@@ -1,39 +1,28 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 
-export interface GeneralSettings {
-  minimizeToTray: boolean;
-  autostart: boolean;
-}
-
 export interface ReceiveSettings {
-  quickSave: boolean;
-  quickSaveFavorites: boolean;
+  autoAccept: boolean; 
   requirePin: boolean;
 }
 
 export interface SettingsState {
   themeIndex: number; // 0=System, 1=Dark, 2=Light
   colorIndex: number; // 0=Plenum, 1=Ocean, 2=Forest
-  general: GeneralSettings;
+  deviceName: string; 
   receive: ReceiveSettings;
 }
 
 export interface SettingsContextType {
   settings: SettingsState;
   updateSettings: (newSettings: Partial<SettingsState>) => void;
-  saveSettings: () => void;
 }
 
 const defaultSettings: SettingsState = {
   themeIndex: 0,
   colorIndex: 0,
-  general: {
-    minimizeToTray: false,
-    autostart: false,
-  },
+  deviceName: "",
   receive: {
-    quickSave: false,
-    quickSaveFavorites: false,
+    autoAccept: false,
     requirePin: false,
   },
 };
@@ -71,13 +60,15 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const stored = localStorage.getItem("plenum-settings");
       if (stored) {
         const parsed = JSON.parse(stored);
-        // Deep-merge with defaults so newly-added keys are always present
-        // even if the stored blob predates them.
         return {
           ...defaultSettings,
-          ...parsed,
-          general: { ...defaultSettings.general, ...parsed.general },
-          receive: { ...defaultSettings.receive, ...parsed.receive },
+          themeIndex: parsed.themeIndex ?? defaultSettings.themeIndex,
+          colorIndex: parsed.colorIndex ?? defaultSettings.colorIndex,
+          deviceName: parsed.deviceName ?? "",
+          receive: {
+            autoAccept: parsed.receive?.autoAccept ?? parsed.receive?.quickSave ?? false,
+            requirePin: parsed.receive?.requirePin ?? false,
+          },
         };
       }
       return defaultSettings;
@@ -91,17 +82,26 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     applyThemeToDom(settings);
   }, []);
 
-  const updateSettings = (newSettings: Partial<SettingsState>) => {
-    setSettings((prev) => ({ ...prev, ...newSettings }));
-  };
+  // Re-apply on OS theme flips while in System mode (no restart needed).
+  useEffect(() => {
+    if (settings.themeIndex !== 0) return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const handler = () => applyThemeToDom(settings);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, [settings.themeIndex, settings.colorIndex]);
 
-  const saveSettings = () => {
-    localStorage.setItem("plenum-settings", JSON.stringify(settings));
-    applyThemeToDom(settings);
+  const updateSettings = (newSettings: Partial<SettingsState>) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...newSettings };
+      localStorage.setItem("plenum-settings", JSON.stringify(next));
+      applyThemeToDom(next);
+      return next;
+    });
   };
 
   return (
-    <SettingsContext.Provider value={{ settings, updateSettings, saveSettings }}>
+    <SettingsContext.Provider value={{ settings, updateSettings }}>
       {children}
     </SettingsContext.Provider>
   );

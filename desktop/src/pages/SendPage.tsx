@@ -6,6 +6,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { PlenumEvent, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, TransferEvent, IceServer } from "../types/rust";
 import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration } from "../utils/format";
+import { useSettings } from "../context/SettingsContext";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
 const STATE_LABELS: Record<string, string> = {
@@ -20,6 +21,7 @@ const STATE_LABELS: Record<string, string> = {
 const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Connecting to device...";
 
 const SendPage: React.FC = () => {
+  const { settings } = useSettings();
   const [mode, setMode] = useState<"local" | "internet">("local");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [peers, setPeers] = useState<DiscoverySummary[]>([]);
@@ -191,6 +193,7 @@ const SendPage: React.FC = () => {
         file_path: selectedPath!,
         address: peer.address,
         discovery_token: peer.token,
+        device_name: settings.deviceName || undefined,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 262144, window_size: 64, timeout_ticks: 15000 }
       };
@@ -231,6 +234,7 @@ const SendPage: React.FC = () => {
         my_peer_id: myPeerId,
         ice_servers: iceServers,
         connect_timeout_secs: 30,
+        device_name: settings.deviceName || undefined,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
       };

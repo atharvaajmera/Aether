@@ -1,25 +1,37 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import { useNavigate } from "react-router-dom";
+import { Pencil, Check, ChevronRight } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { useSettings } from "../context/SettingsContext";
 
 const SettingsPage: React.FC = () => {
   const { settings, updateSettings } = useSettings();
-
-  // Local state for the UI before saving
-  const [generalSettings, setGeneralSettings] = useState(settings.general);
-  const [receiveSettings, setReceiveSettings] = useState(settings.receive);
-  const [themeIndex, setThemeIndex] = useState(settings.themeIndex);
-  const [colorIndex, setColorIndex] = useState(settings.colorIndex);
-  const [showSaved, setShowSaved] = useState(false);
+  const navigate = useNavigate();
 
   const themes = ["System", "Dark", "Light"];
   const colors = ["Plenum", "Ocean", "Forest"];
 
-  const toggleGeneral = (key: keyof typeof generalSettings) => {
-    setGeneralSettings(prev => ({ ...prev, [key]: !prev[key] }));
+  const [hostname, setHostname] = useState<string>("");
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(settings.deviceName);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    invoke<string>("get_device_name").then(setHostname).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    if (editingName) inputRef.current?.focus();
+  }, [editingName]);
+
+  const startEdit = () => {
+    setNameDraft(settings.deviceName);
+    setEditingName(true);
   };
 
-  const toggleReceive = (key: keyof typeof receiveSettings) => {
-    setReceiveSettings(prev => ({ ...prev, [key]: !prev[key] }));
+  const commitName = () => {
+    updateSettings({ deviceName: nameDraft.trim() });
+    setEditingName(false);
   };
 
   const Toggle = ({ on, onClick }: { on: boolean; onClick: () => void }) => (
@@ -28,35 +40,6 @@ const SettingsPage: React.FC = () => {
     </div>
   );
 
-  useEffect(() => {
-    // If settings change in context, we sync them (though typically not needed if this is the only modifier)
-  }, [settings]);
-
-  const handleSaveClick = async () => {
-    updateSettings({
-      themeIndex,
-      colorIndex,
-      general: generalSettings,
-      receive: receiveSettings,
-    });
-    // Slight hack: we save the object directly to localstorage here so it's synchronous
-    const newSettings = {
-      themeIndex,
-      colorIndex,
-      general: generalSettings,
-      receive: receiveSettings,
-    };
-    localStorage.setItem("plenum-settings", JSON.stringify(newSettings));
-    
-    // Call the standalone apply function from context
-    import("../context/SettingsContext").then(({ applyThemeToDom }) => {
-        applyThemeToDom(newSettings);
-    });
-
-    setShowSaved(true);
-    setTimeout(() => setShowSaved(false), 3000);
-  };
-
   return (
     <div className="settings-container">
       <h1 className="settings-title">Settings</h1>
@@ -64,48 +47,98 @@ const SettingsPage: React.FC = () => {
       <div className="settings-card">
         <h3 style={{ padding: "16px 24px", fontSize: "14px", fontWeight: 600 }}>General</h3>
         <div className="settings-row">
+          <span className="settings-label">Device Name</span>
+          {editingName ? (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <input
+                ref={inputRef}
+                className="pill-select"
+                value={nameDraft}
+                placeholder={hostname}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitName();
+                  if (e.key === "Escape") setEditingName(false);
+                }}
+                style={{ minWidth: "160px" }}
+              />
+              <button
+                className="icon-btn"
+                onClick={commitName}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent-primary)" }}
+              >
+                <Check size={18} />
+              </button>
+            </div>
+          ) : (
+            <div
+              style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}
+              onClick={startEdit}
+            >
+              <span style={{ color: "var(--text-secondary)" }}>
+                {settings.deviceName || hostname}
+              </span>
+              <Pencil size={16} />
+            </div>
+          )}
+        </div>
+        <div className="settings-row">
           <span className="settings-label">Theme</span>
-          <select className="pill-select" value={themeIndex} onChange={(e) => setThemeIndex(Number(e.target.value))}>
+          <select
+            className="pill-select"
+            value={settings.themeIndex}
+            onChange={(e) => updateSettings({ themeIndex: Number(e.target.value) })}
+          >
             {themes.map((t, i) => <option key={i} value={i}>{t}</option>)}
           </select>
         </div>
         <div className="settings-row">
           <span className="settings-label">Color</span>
-          <select className="pill-select" value={colorIndex} onChange={(e) => setColorIndex(Number(e.target.value))}>
+          <select
+            className="pill-select"
+            value={settings.colorIndex}
+            onChange={(e) => updateSettings({ colorIndex: Number(e.target.value) })}
+          >
             {colors.map((c, i) => <option key={i} value={i}>{c}</option>)}
           </select>
-        </div>
-        <div className="settings-row">
-          <span className="settings-label">Minimize to the System Tray/Menu Bar when closing</span>
-          <Toggle on={generalSettings.minimizeToTray} onClick={() => toggleGeneral("minimizeToTray")} />
-        </div>
-        <div className="settings-row">
-          <span className="settings-label">Autostart after login</span>
-          <Toggle on={generalSettings.autostart} onClick={() => toggleGeneral("autostart")} />
         </div>
       </div>
 
       <div className="settings-card">
         <h3 style={{ padding: "16px 24px", fontSize: "14px", fontWeight: 600 }}>Receive</h3>
         <div className="settings-row">
-          <span className="settings-label">Quick Save</span>
-          <Toggle on={receiveSettings.quickSave} onClick={() => toggleReceive("quickSave")} />
-        </div>
-        <div className="settings-row">
-          <span className="settings-label">Quick Save for "Favorites"</span>
-          <Toggle on={receiveSettings.quickSaveFavorites} onClick={() => toggleReceive("quickSaveFavorites")} />
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <span className="settings-label">Auto-accept files</span>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+              Automatically receive incoming files
+            </span>
+          </div>
+          <Toggle
+            on={settings.receive.autoAccept}
+            onClick={() => updateSettings({ receive: { ...settings.receive, autoAccept: !settings.receive.autoAccept } })}
+          />
         </div>
         <div className="settings-row">
           <span className="settings-label">Require PIN</span>
-          <Toggle on={receiveSettings.requirePin} onClick={() => toggleReceive("requirePin")} />
+          <Toggle
+            on={settings.receive.requirePin}
+            onClick={() => updateSettings({ receive: { ...settings.receive, requirePin: !settings.receive.requirePin } })}
+          />
         </div>
       </div>
 
-      <div style={{ display: "flex", justifyContent: "center", marginTop: "32px", paddingBottom: "32px", position: "relative" }}>
-        {showSaved && <div style={{ position: "absolute", top: "-30px", color: "var(--accent-primary)", fontWeight: 500 }}>Settings saved!</div>}
-        <button className="big-nav-btn" onClick={handleSaveClick} style={{ padding: "12px 48px", backgroundColor: "var(--accent-primary)", color: "var(--bg-app)", border: "none" }}>
-          Save Settings
-        </button>
+      <div className="settings-card">
+        <div className="settings-row" style={{ cursor: "pointer" }} onClick={() => navigate("/history")}>
+          <span className="settings-label">Transfer History</span>
+          <ChevronRight size={18} />
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <div className="settings-row" style={{ cursor: "pointer" }} onClick={() => navigate("/about")}>
+          <span className="settings-label">About Plenum</span>
+          <ChevronRight size={18} />
+        </div>
       </div>
     </div>
   );

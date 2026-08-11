@@ -2,9 +2,11 @@ import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Send, Wifi, Settings } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { useSettings } from "../context/SettingsContext";
 
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
+  const { settings } = useSettings();
   const [deviceName, setDeviceName] = useState<string>("Loading...");
   const [localIp, setLocalIp] = useState<string>("");
   const [username, setUsername] = useState<string>("");
@@ -30,7 +32,7 @@ const HomePage: React.FC = () => {
         <div className="core-circle"></div>
       </div>
       
-      <h1 className="device-name">{deviceName}</h1>
+      <h1 className="device-name">{settings.deviceName || deviceName}</h1>
       <div className="device-id">{localIp} {username ? `• ${username}` : ''}</div>
 
       <div className="nav-buttons-container">

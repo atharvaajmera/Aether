@@ -83,9 +83,7 @@ const ReceivePage: React.FC = () => {
       }
     } else if ("IncomingRequest" in trans) {
       const req = trans.IncomingRequest;
-      // Quick-save keeps auto-accept: the engine is already proceeding, no
-      // dialog needed.
-      if (!settingsRef.current.receive.quickSave) {
+      if (!settingsRef.current.receive.autoAccept) {
         setIncoming({
           fileName: req.file_name,
           totalBytes: req.total_bytes,
@@ -200,8 +198,9 @@ const ReceivePage: React.FC = () => {
         output_dir: downloadsPath,
         announce_on_lan: true,
         require_pin: settings.receive.requirePin,
-        // Quick-save keeps auto-accept; otherwise the accept dialog gates.
-        auto_accept: settings.receive.quickSave,
+        // Auto-accept skips the accept dialog; otherwise it gates.
+        auto_accept: settings.receive.autoAccept,
+        device_name: settings.deviceName || undefined,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 262144, window_size: 64, timeout_ticks: 15000 }
       };
@@ -265,7 +264,8 @@ const ReceivePage: React.FC = () => {
         my_peer_id: myPeerId,
         ice_servers: iceServers,
         connect_timeout_secs: 30,
-        auto_accept: settings.receive.quickSave,
+        auto_accept: settings.receive.autoAccept,
+        device_name: settings.deviceName || undefined,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
       };
@@ -310,7 +310,7 @@ const ReceivePage: React.FC = () => {
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginTop: "20px" }}>
         {mode === "local" && (
           <>
-            <h1 className="device-name" style={{ textAlign: "center" }}>{deviceName}</h1>
+            <h1 className="device-name" style={{ textAlign: "center" }}>{settings.deviceName || deviceName}</h1>
             <div className="device-id" style={{ textAlign: "center", userSelect: "text" }}>
               {localIp}{port ? `:${port}` : ''} {username ? `• ${username}` : ''}
             </div>
@@ -318,7 +318,7 @@ const ReceivePage: React.FC = () => {
         )}
 
         {mode === "internet" && (
-          <h1 className="device-name" style={{ textAlign: "center" }}>{deviceName}</h1>
+          <h1 className="device-name" style={{ textAlign: "center" }}>{settings.deviceName || deviceName}</h1>
         )}
 
         <div style={{ marginTop: "20px", fontSize: "14px", color: "var(--text-secondary)", textAlign: "center" }}>
