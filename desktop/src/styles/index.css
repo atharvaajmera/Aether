@@ -202,22 +202,25 @@ body {
 
 /* Settings Layout */
 .settings-container {
-  max-width: 600px;
+  max-width: 720px;
   margin: 0 auto;
+  width: 100%;
+  padding: 0 16px;
+  box-sizing: border-box;
 }
 
 .settings-title {
   font-size: 20px;
   font-weight: 600;
-  text-align: center;
-  margin-bottom: 32px;
+  text-align: left;
+  margin-bottom: 24px;
 }
 
 .settings-card {
   background-color: var(--bg-card);
   border-radius: 16px;
   padding: 8px 0;
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .settings-row {
@@ -232,9 +235,122 @@ body {
   font-weight: 500;
 }
 
+.settings-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 24px 0 8px;
+  padding: 0 4px;
+}
+
 .settings-control {
   display: flex;
   align-items: center;
+}
+
+/* Modal Dialog */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: modalFadeIn 0.15s ease-out;
+}
+
+@keyframes modalFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.modal-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 28px;
+  width: 100%;
+  max-width: 380px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+  animation: modalSlideUp 0.2s ease-out;
+}
+
+@keyframes modalSlideUp {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.modal-card h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+}
+
+.modal-card .modal-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0 0 20px;
+}
+
+.modal-card input.modal-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.modal-card input.modal-input:focus {
+  border-color: var(--accent-primary);
+}
+
+.modal-card input.modal-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.5;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.modal-actions button {
+  padding: 8px 20px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  transition: opacity 0.15s;
+}
+
+.modal-actions button:hover {
+  opacity: 0.85;
+}
+
+.modal-actions .modal-cancel {
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+}
+
+.modal-actions .modal-save {
+  background: var(--accent-primary);
+  color: #fff;
 }
 
 /* Home & Receive Page Animation & Layout */
@@ -351,7 +467,8 @@ body {
   left: 24px;
 }
 
-select.pill-select {
+select.pill-select,
+input.pill-select {
   background-color: var(--bg-sidebar);
   border-radius: 8px;
   padding: 8px 12px;
@@ -364,7 +481,17 @@ select.pill-select {
   font-family: inherit;
 }
 
-select.pill-select:focus {
+input.pill-select {
+  cursor: text;
+}
+
+input.pill-select::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+select.pill-select:focus,
+input.pill-select:focus {
   border-color: var(--accent-primary);
 }
 

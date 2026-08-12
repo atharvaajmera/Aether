@@ -20,8 +20,8 @@ const HistoryPage: React.FC = () => {
 
   return (
     <div className="settings-container">
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <h1 className="settings-title">Transfer History</h1>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }}>
+        <h1 className="settings-title" style={{ marginBottom: 0 }}>Transfer History</h1>
         {entries.length > 0 && (
           <button
             onClick={handleClear}

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Pencil, Check, ChevronRight } from "lucide-react";
+import { Pencil, ChevronRight } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettings } from "../context/SettingsContext";
 
@@ -12,8 +12,8 @@ const SettingsPage: React.FC = () => {
   const colors = ["Plenum", "Ocean", "Forest"];
 
   const [hostname, setHostname] = useState<string>("");
-  const [editingName, setEditingName] = useState(false);
-  const [nameDraft, setNameDraft] = useState(settings.deviceName);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -21,17 +21,19 @@ const SettingsPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (editingName) inputRef.current?.focus();
-  }, [editingName]);
+    if (renameOpen) {
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  }, [renameOpen]);
 
-  const startEdit = () => {
+  const openRename = () => {
     setNameDraft(settings.deviceName);
-    setEditingName(true);
+    setRenameOpen(true);
   };
 
-  const commitName = () => {
+  const saveRename = () => {
     updateSettings({ deviceName: nameDraft.trim() });
-    setEditingName(false);
+    setRenameOpen(false);
   };
 
   const Toggle = ({ on, onClick }: { on: boolean; onClick: () => void }) => (
@@ -40,47 +42,22 @@ const SettingsPage: React.FC = () => {
     </div>
   );
 
+  const displayName = settings.deviceName || hostname;
+
   return (
     <div className="settings-container">
       <h1 className="settings-title">Settings</h1>
 
+      <h3 className="settings-section-title">General</h3>
       <div className="settings-card">
-        <h3 style={{ padding: "16px 24px", fontSize: "14px", fontWeight: 600 }}>General</h3>
-        <div className="settings-row">
-          <span className="settings-label">Device Name</span>
-          {editingName ? (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <input
-                ref={inputRef}
-                className="pill-select"
-                value={nameDraft}
-                placeholder={hostname}
-                onChange={(e) => setNameDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") commitName();
-                  if (e.key === "Escape") setEditingName(false);
-                }}
-                style={{ minWidth: "160px" }}
-              />
-              <button
-                className="icon-btn"
-                onClick={commitName}
-                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent-primary)" }}
-              >
-                <Check size={18} />
-              </button>
-            </div>
-          ) : (
-            <div
-              style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}
-              onClick={startEdit}
-            >
-              <span style={{ color: "var(--text-secondary)" }}>
-                {settings.deviceName || hostname}
-              </span>
-              <Pencil size={16} />
-            </div>
-          )}
+        <div className="settings-row" style={{ cursor: "pointer" }} onClick={openRename}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+            <span className="settings-label">Device Name</span>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+              {displayName}
+            </span>
+          </div>
+          <Pencil size={16} color="var(--text-secondary)" />
         </div>
         <div className="settings-row">
           <span className="settings-label">Theme</span>
@@ -104,8 +81,8 @@ const SettingsPage: React.FC = () => {
         </div>
       </div>
 
+      <h3 className="settings-section-title">Receive</h3>
       <div className="settings-card">
-        <h3 style={{ padding: "16px 24px", fontSize: "14px", fontWeight: 600 }}>Receive</h3>
         <div className="settings-row">
           <div style={{ display: "flex", flexDirection: "column" }}>
             <span className="settings-label">Auto-accept files</span>
@@ -140,6 +117,36 @@ const SettingsPage: React.FC = () => {
           <ChevronRight size={18} />
         </div>
       </div>
+
+      {renameOpen && (
+        <div className="modal-overlay" onClick={() => setRenameOpen(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h2>Rename your device</h2>
+            <p className="modal-subtitle">
+              Currently: <strong>{displayName}</strong>
+            </p>
+            <input
+              ref={inputRef}
+              className="modal-input"
+              value={nameDraft}
+              placeholder="Name your device"
+              onChange={(e) => setNameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveRename();
+                if (e.key === "Escape") setRenameOpen(false);
+              }}
+            />
+            <div className="modal-actions">
+              <button className="modal-cancel" onClick={() => setRenameOpen(false)}>
+                Cancel
+              </button>
+              <button className="modal-save" onClick={saveRename}>
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
