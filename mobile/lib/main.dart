@@ -32,7 +32,7 @@ class PlenumApp extends StatelessWidget {
       builder: (context, settings, _) {
         return MaterialApp(
           title: 'Plenum',
-          theme: AppTheme.darkTheme, // TODO: add lightTheme if needed
+          theme: AppTheme.lightTheme,
           darkTheme: AppTheme.darkTheme,
           themeMode: settings.themeMode,
           home: const MainScreen(),
