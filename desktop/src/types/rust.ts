@@ -73,6 +73,7 @@ export interface DiscoverySummary {
     hostname: string;
     address: string;
     token: string;
+    pin_required: boolean;
 }
 
 export type ConnectionState = "Discovering" | "Listening" | "Connecting" | "SignalingConnected" | "NegotiatingIce" | "Connected" | "Closed";

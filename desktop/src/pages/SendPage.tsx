@@ -198,7 +198,7 @@ const SendPage: React.FC = () => {
   const handlePinSubmit = async () => {
     if (!pinInputPeer) return;
     
-    if (pinInput.trim() !== "") {
+    if (!pinInputPeer.pin_required && pinInput.trim() !== "") {
       if (pinInput.trim().toUpperCase() !== pinInputPeer.token.toUpperCase()) {
         setTransferStatus("Error: Incorrect PIN entered.");
         return;
@@ -214,7 +214,7 @@ const SendPage: React.FC = () => {
       const req: SendRequest = {
         file_path: selectedPath!,
         address: peer.address,
-        discovery_token: peer.token,
+        discovery_token: peer.pin_required ? pinInput.trim() : peer.token || undefined,
         device_name: settings.deviceName || undefined,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 262144, window_size: 64, timeout_ticks: 15000 }
