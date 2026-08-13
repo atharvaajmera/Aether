@@ -25,14 +25,12 @@ use crate::rtc::RtcTransport;
 use crate::signaling::{IceServer, RoutedSignal, SignalMessage, SignalingState};
 use crate::stream::{ResumeCheckpoint, chunk_bytes};
 use crate::transport::{
-    MemoryTransport, MemoryTransportConfig, TcpTransport, Transport, TransportError,
+    MemoryTransport, MemoryTransportConfig, SecureTransport, TcpTransport, Transport, TransportError,
 };
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 const ACCEPT_WAIT_TIMEOUT: Duration = Duration::from_secs(150);
-
-const AUTH_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const CLOSE_REASON_DECLINED: &str = "declined";
 const CLOSE_REASON_PIN_REJECTED: &str = "pin_rejected";
@@ -124,10 +122,14 @@ impl PlenumCore {
         
         let control_transport = MemoryTransport::new(MemoryTransportConfig::default());
         
-        let mut transport = crate::transport::MultipathTransport::new(
+        let transport = crate::transport::MultipathTransport::new(
             Box::new(tcp_transport),
             Box::new(control_transport),
         );
+        let mut transport = SecureTransport::connect(
+            transport,
+            request.discovery_token.as_deref().filter(|token| !token.trim().is_empty()),
+        )?;
         
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Send,
@@ -144,7 +146,6 @@ impl PlenumCore {
             &request.options,
             Some(address),
             &self.control,
-            request.discovery_token.as_deref(),
             request.device_name.as_deref(),
         )
     }
@@ -232,7 +233,6 @@ impl PlenumCore {
             &request.options,
             Some(request.session_id.clone()),
             &self.control,
-            None,
             request.device_name.as_deref(),
         )
     }
@@ -338,36 +338,24 @@ impl PlenumCore {
             let tcp_transport = TcpTransport::from_stream(stream)?;
 
             let control_transport = MemoryTransport::new(MemoryTransportConfig::default());
-            let mut transport = crate::transport::MultipathTransport::new(
+            let transport = crate::transport::MultipathTransport::new(
                 Box::new(tcp_transport),
                 Box::new(control_transport),
             );
-
-            if request.require_pin {
-                match verify_sender_auth(&mut transport, token, control) {
-                    Ok(()) => {}
-                    Err(AuthGateOutcome::WrongPin) => {
-                        sink.emit(PlenumEvent::Log {
-                            level: LogLevel::Warn,
-                            message: format!("rejected connection from {peer}: invalid PIN"),
-                        });
-                        let _ = transport.send(&encode_packet(&Packet::new(
-                            PacketType::Close,
-                            0,
-                            CLOSE_REASON_PIN_REJECTED.as_bytes().to_vec(),
-                        ))?);
-                        let _ = transport.close();
-                        continue;
-                    }
-                    Err(AuthGateOutcome::Cancelled) => {
-                        sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
-                            direction: TransferDirection::Receive,
-                        }));
-                        return Err(AppError::Cancelled);
-                    }
-                    Err(AuthGateOutcome::Error(error)) => return Err(error),
+            let mut transport = match SecureTransport::accept(
+                transport,
+                request.require_pin.then_some(token.code()),
+            ) {
+                Ok(transport) => transport,
+                Err(error) if request.require_pin => {
+                    sink.emit(PlenumEvent::Log {
+                        level: LogLevel::Warn,
+                        message: format!("rejected secure connection from {peer}: {error}"),
+                    });
+                    continue;
                 }
-            }
+                Err(error) => return Err(error.into()),
+            };
 
             sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
                 direction: TransferDirection::Receive,
@@ -876,7 +864,6 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     options: &crate::app::types::TransferOptions,
     peer_label: Option<String>,
     control: &SessionControl,
-    pin: Option<&str>,
     device_name: Option<&str>,
 ) -> Result<TransferSummary, AppError> {
     let file_name = file_name.to_string();
@@ -885,14 +872,6 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         direction: TransferDirection::Send,
         mode: transfer_mode(transport),
     }));
-
-    if let Some(pin) = pin {
-        transport.send(&encode_packet(&Packet::new(
-            PacketType::Auth,
-            0,
-            pin.trim().as_bytes().to_vec(),
-        ))?)?;
-    }
 
     transport.send(&encode_packet(&Packet::new(
         PacketType::Start,
@@ -1807,54 +1786,6 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
 }
 
 /// Why the PIN gate turned a connection away (or failed outright).
-enum AuthGateOutcome {
-    /// No `Auth` packet, a wrong code, or garbage: drop this connection and
-    /// keep listening.
-    WrongPin,
-    /// The local user cancelled the receive session while we waited.
-    Cancelled,
-    /// A transport-level failure that should abort the whole session.
-    Error(AppError),
-}
-
-/// Receiver side of the PIN gate: the first packet on a connection must be an
-/// `Auth` carrying the pairing code when "require PIN" is enabled.
-fn verify_sender_auth<T: Transport>(
-    transport: &mut T,
-    token: &PairingToken,
-    control: &SessionControl,
-) -> Result<(), AuthGateOutcome> {
-    let deadline = Instant::now() + AUTH_WAIT_TIMEOUT;
-    loop {
-        if control.is_cancelled() {
-            return Err(AuthGateOutcome::Cancelled);
-        }
-        match transport.recv() {
-            Ok(Some(frame)) => {
-                let Ok(packet) = parse_packet(&frame) else {
-                    return Err(AuthGateOutcome::WrongPin);
-                };
-                if packet.packet_type != PacketType::Auth {
-                    return Err(AuthGateOutcome::WrongPin);
-                }
-                let candidate = String::from_utf8_lossy(&packet.payload).into_owned();
-                return if token.code().eq_ignore_ascii_case(candidate.trim()) {
-                    Ok(())
-                } else {
-                    Err(AuthGateOutcome::WrongPin)
-                };
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    return Err(AuthGateOutcome::WrongPin);
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(AuthGateOutcome::Error(error.into())),
-        }
-    }
-}
-
 fn wait_for_accept<T: Transport, S: EventSink>(
     transport: &mut T,
     control: &SessionControl,
