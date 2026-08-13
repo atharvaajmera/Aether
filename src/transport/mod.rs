@@ -4,11 +4,13 @@ pub mod error;
 pub mod memory;
 pub mod tcp;
 pub mod multipath;
+pub mod secure;
 
 pub use error::TransportError;
 pub use memory::{MemoryTransport, MemoryTransportConfig};
 pub use tcp::TcpTransport;
 pub use multipath::MultipathTransport;
+pub use secure::SecureTransport;
 
 pub type TransportResult<T> = Result<T, TransportError>;
 
