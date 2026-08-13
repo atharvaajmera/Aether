@@ -27,7 +27,7 @@ const ReceivePage: React.FC = () => {
   const [deviceName, setDeviceName] = useState<string>("Loading...");
   const [localIp, setLocalIp] = useState<string>("");
   const [username, setUsername] = useState<string>("");
-  const [status, setStatus] = useState<string>("Ready to receive files");
+  const [status, setStatus] = useState<string>("Ready to receive files...");
   const [progress, setProgress] = useState<{ transferred: number, total: number } | null>(null);
   const [pin, setPin] = useState<string | null>(null);
   const [port, setPort] = useState<number | null>(null);
@@ -39,6 +39,7 @@ const ReceivePage: React.FC = () => {
   const [speedText, setSpeedText] = useState<string | null>(null);
   const [etaText, setEtaText] = useState<string | null>(null);
   const transferStartRef = useRef<number | null>(null);
+  const terminalEventRef = useRef(false);
   const { settings } = useSettings();
   // The listen callback closes over the first render's outputDir otherwise.
   const outputDirRef = useRef<string>("");
@@ -71,6 +72,17 @@ const ReceivePage: React.FC = () => {
     }
   };
 
+  const handleModeChange = async (nextMode: "local" | "internet") => {
+    if (nextMode === mode) return;
+    setStatus("Switching receiver mode...");
+    try {
+      await invoke("cancel_session_command");
+    } catch (err) {
+      console.error("Could not cancel the previous receiver:", err);
+    }
+    setMode(nextMode);
+  };
+
   // Shared per-event handler for both local and internet receivers.
   const handleTransferEvent = (trans: TransferEvent) => {
     if ("StateChanged" in trans) {
@@ -92,7 +104,11 @@ const ReceivePage: React.FC = () => {
         });
         setStatus("Incoming file — waiting for your decision");
       }
+    } else if ("ConnectionEstablished" in trans) {
+      const connection = trans.ConnectionEstablished.mode === "Relay" ? "relay" : trans.ConnectionEstablished.mode === "Direct" ? "direct connection" : "local network";
+      setStatus(`Connected via ${connection}`);
     } else if ("Cancelled" in trans) {
+      terminalEventRef.current = true;
       setIncoming(null);
       setStatus("Transfer cancelled");
       setProgress(null);
@@ -100,6 +116,7 @@ const ReceivePage: React.FC = () => {
       setEtaText(null);
       transferStartRef.current = null;
     } else if ("Declined" in trans) {
+      terminalEventRef.current = true;
       setIncoming(null);
       setStatus(trans.Declined.reason === "cancelled" ? "Sender cancelled the transfer" : "Transfer declined");
       setProgress(null);
@@ -107,13 +124,19 @@ const ReceivePage: React.FC = () => {
       setEtaText(null);
       transferStartRef.current = null;
     } else if ("Started" in trans) {
+      terminalEventRef.current = false;
       setIncoming(null);
       setSavedPath(null);
-      setStatus(`Receiving ${trans.Started.file_name}...`);
-      setProgress({ transferred: 0, total: trans.Started.total_bytes });
+      setStatus(trans.Started.resumed_bytes > 0
+        ? `Resuming ${trans.Started.file_name} from ${formatBytes(trans.Started.resumed_bytes)}...`
+        : `Receiving ${trans.Started.file_name}...`);
+      setProgress({ transferred: trans.Started.resumed_bytes, total: trans.Started.total_bytes });
       transferStartRef.current = Date.now();
       setSpeedText(null);
       setEtaText(null);
+    } else if ("Resumed" in trans) {
+      setStatus(`Resuming receive from ${formatBytes(trans.Resumed.resumed_bytes)}...`);
+      setProgress((current) => current ? { ...current, transferred: trans.Resumed.resumed_bytes } : current);
     } else if ("Progress" in trans) {
       setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
       if (transferStartRef.current) {
@@ -127,6 +150,7 @@ const ReceivePage: React.FC = () => {
         }
       }
     } else if ("Completed" in trans) {
+      terminalEventRef.current = true;
       const summary: TransferSummary = trans.Completed;
       const path = outputDirRef.current
         ? `${outputDirRef.current}${outputDirRef.current.endsWith("\\") || outputDirRef.current.endsWith("/") ? "" : "\\"}${summary.file_name}`
@@ -170,6 +194,7 @@ const ReceivePage: React.FC = () => {
     if (mode !== "local") return;
 
     let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
 
     const setupReceiver = async () => {
       // 1. Listen for events
@@ -205,18 +230,24 @@ const ReceivePage: React.FC = () => {
         options: { chunk_size: 262144, window_size: 64, timeout_ticks: 15000 }
       };
 
-      try {
-        const result = await invoke<TransferSummary>("receive_file_command", { request: req });
-        console.log("Receive completed:", result);
-      } catch (err) {
-        console.error("Receive error:", err);
-        setStatus("Error: " + err);
+      while (!cancelled) {
+        terminalEventRef.current = false;
+        try {
+          const result = await invoke<TransferSummary>("receive_file_command", { request: req });
+          console.log("Receive completed:", result);
+          if (!cancelled) await new Promise(resolve => setTimeout(resolve, 1500));
+        } catch (err) {
+          console.error("Receive error:", err);
+          if (!cancelled && !terminalEventRef.current) setStatus("Error: " + err);
+          break;
+        }
       }
     };
 
     setupReceiver();
 
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, [mode]);
@@ -275,7 +306,7 @@ const ReceivePage: React.FC = () => {
         console.log("Receive completed:", result);
       } catch (err) {
         console.error("Receive error:", err);
-        setStatus("Error: " + err);
+        if (!cancelled && !terminalEventRef.current) setStatus("Error: " + err);
       }
     };
 
@@ -287,16 +318,20 @@ const ReceivePage: React.FC = () => {
     };
   }, [mode]);
 
+  useEffect(() => () => {
+    invoke("cancel_session_command").catch(console.error);
+  }, []);
+
   return (
     <div className="receive-container">
       {incoming && <TransferAcceptDialog incoming={incoming} onRespond={handleAcceptResponse} />}
 
       <div className="card-grid" style={{ width: "100%", maxWidth: "300px", marginBottom: "24px" }}>
-        <div className="action-card" onClick={() => setMode("local")} style={{ borderColor: mode === "local" ? "var(--accent-primary)" : "var(--border-color)" }}>
+        <div className="action-card" onClick={() => handleModeChange("local")} style={{ borderColor: mode === "local" ? "var(--accent-primary)" : "var(--border-color)" }}>
           <Wifi size={24} />
           <span>Local Network</span>
         </div>
-        <div className="action-card" onClick={() => setMode("internet")} style={{ borderColor: mode === "internet" ? "var(--accent-primary)" : "var(--border-color)" }}>
+        <div className="action-card" onClick={() => handleModeChange("internet")} style={{ borderColor: mode === "internet" ? "var(--accent-primary)" : "var(--border-color)" }}>
           <Globe size={24} />
           <span>Internet</span>
         </div>

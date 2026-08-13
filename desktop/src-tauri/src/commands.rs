@@ -5,25 +5,32 @@ use plenum::app::types::{
     TransferSummary,
 };
 use plenum::signaling::IceServer;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
-fn current_session() -> &'static Mutex<Option<SessionControl>> {
-    static SESSION: OnceLock<Mutex<Option<SessionControl>>> = OnceLock::new();
+fn current_session() -> &'static Mutex<Option<(u64, SessionControl)>> {
+    static SESSION: OnceLock<Mutex<Option<(u64, SessionControl)>>> = OnceLock::new();
     SESSION.get_or_init(|| Mutex::new(None))
 }
 
-fn register_session(control: SessionControl) {
-    *current_session().lock().unwrap() = Some(control);
+fn register_session(control: SessionControl) -> u64 {
+    static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+    let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    *current_session().lock().unwrap() = Some((session_id, control));
+    session_id
 }
 
-fn unregister_session() {
-    *current_session().lock().unwrap() = None;
+fn unregister_session(session_id: u64) {
+    let mut current = current_session().lock().unwrap();
+    if current.as_ref().is_some_and(|(id, _)| *id == session_id) {
+        *current = None;
+    }
 }
 
 #[tauri::command]
 pub fn respond_to_incoming_command(accept: bool) {
-    if let Some(control) = current_session().lock().unwrap().as_ref() {
+    if let Some((_, control)) = current_session().lock().unwrap().as_ref() {
         if accept {
             control.accept();
         } else {
@@ -35,7 +42,7 @@ pub fn respond_to_incoming_command(accept: bool) {
 /// Requests cancellation of the currently running transfer session.
 #[tauri::command]
 pub fn cancel_session_command() {
-    if let Some(control) = current_session().lock().unwrap().as_ref() {
+    if let Some((_, control)) = current_session().lock().unwrap().as_ref() {
         control.cancel();
     }
 }
@@ -54,12 +61,12 @@ pub async fn send_file_command(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let mut core = PlenumCore::new();
-        register_session(core.control());
+        let session_id = register_session(core.control());
         let mut sink = |event: PlenumEvent| {
             let _ = app.emit("plenum-event", event);
         };
         let result = core.send_file(request, &mut sink).map_err(|e| e.to_string());
-        unregister_session();
+        unregister_session(session_id);
         result
     })
     .await
@@ -76,14 +83,14 @@ pub async fn receive_file_command(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let mut core = PlenumCore::new();
-        register_session(core.control());
+        let session_id = register_session(core.control());
         let mut sink = |event: PlenumEvent| {
             let _ = app.emit("plenum-event", event);
         };
         let result = core
             .receive_file(request, &mut sink)
             .map_err(|e| e.to_string());
-        unregister_session();
+        unregister_session(session_id);
         result
     })
     .await
@@ -117,14 +124,14 @@ pub async fn send_file_remote_command(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let mut core = PlenumCore::new();
-        register_session(core.control());
+        let session_id = register_session(core.control());
         let mut sink = |event: PlenumEvent| {
             let _ = app.emit("plenum-event", event);
         };
         let result = core
             .send_file_remote(request, &mut sink)
             .map_err(|e| e.to_string());
-        unregister_session();
+        unregister_session(session_id);
         result
     })
     .await
@@ -141,14 +148,14 @@ pub async fn receive_file_remote_command(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let mut core = PlenumCore::new();
-        register_session(core.control());
+        let session_id = register_session(core.control());
         let mut sink = |event: PlenumEvent| {
             let _ = app.emit("plenum-event", event);
         };
         let result = core
             .receive_file_remote(request, &mut sink)
             .map_err(|e| e.to_string());
-        unregister_session();
+        unregister_session(session_id);
         result
     })
     .await

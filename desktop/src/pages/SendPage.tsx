@@ -39,6 +39,7 @@ const SendPage: React.FC = () => {
   // Auto-reset timer so a late Completed can't race a fresh transfer's UI.
   const autoResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const transferStartRef = useRef<number | null>(null);
+  const terminalEventRef = useRef(false);
 
   const startDiscovery = async () => {
     setIsDiscovering(true);
@@ -81,11 +82,22 @@ const SendPage: React.FC = () => {
            } else if ("Started" in trans) {
               if (autoResetRef.current) clearTimeout(autoResetRef.current);
               setSendSuccess(false);
-              setTransferStatus(`Sending ${trans.Started.file_name}...`);
-              setProgress({ transferred: 0, total: trans.Started.total_bytes });
+              setTransferStatus(trans.Started.resumed_bytes > 0
+                ? `Resuming ${trans.Started.file_name} from ${formatBytes(trans.Started.resumed_bytes)}...`
+                : `Sending ${trans.Started.file_name}...`);
+              setProgress({ transferred: trans.Started.resumed_bytes, total: trans.Started.total_bytes });
               transferStartRef.current = Date.now();
               setSpeedText(null);
               setEtaText(null);
+              terminalEventRef.current = false;
+           } else if ("ConnectionEstablished" in trans) {
+              const connection = trans.ConnectionEstablished.mode === "Relay" ? "relay" : trans.ConnectionEstablished.mode === "Direct" ? "direct connection" : "local network";
+              setTransferStatus(`Connected via ${connection}`);
+           } else if ("AwaitingApproval" in trans) {
+              setTransferStatus("Waiting for receiver to accept...");
+           } else if ("Resumed" in trans) {
+              setTransferStatus(`Resuming transfer from ${formatBytes(trans.Resumed.resumed_bytes)}...`);
+              setProgress((current) => current ? { ...current, transferred: trans.Resumed.resumed_bytes } : current);
            } else if ("Progress" in trans) {
               setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
               if (transferStartRef.current) {
@@ -99,12 +111,21 @@ const SendPage: React.FC = () => {
                 }
               }
            } else if ("Declined" in trans) {
+              terminalEventRef.current = true;
               setTransferStatus(trans.Declined.reason === "timeout" ? "Receiver did not respond" : "Receiver declined the transfer");
               setProgress(null);
               setSpeedText(null);
               setEtaText(null);
               transferStartRef.current = null;
+           } else if ("Cancelled" in trans) {
+              terminalEventRef.current = true;
+              setTransferStatus("Transfer cancelled");
+              setProgress(null);
+              setSpeedText(null);
+              setEtaText(null);
+              transferStartRef.current = null;
            } else if ("Completed" in trans) {
+             terminalEventRef.current = true;
              const summary: TransferSummary = trans.Completed;
              const peerLabel = summary.peer_name ?? summary.peer ?? "device";
              addHistoryEntry({
@@ -185,6 +206,7 @@ const SendPage: React.FC = () => {
     }
 
     setTransferStatus("Connecting to device...");
+    terminalEventRef.current = false;
     const peer = pinInputPeer;
     setPinInputPeer(null);
     
@@ -201,7 +223,7 @@ const SendPage: React.FC = () => {
       console.log("Send completed:", result);
     } catch (err) {
       console.error("Send error:", err);
-      setTransferStatus("Error: " + err);
+      if (!terminalEventRef.current) setTransferStatus("Error: " + err);
       setProgress(null);
     }
   };
@@ -217,6 +239,7 @@ const SendPage: React.FC = () => {
     }
 
     setTransferStatus("Connecting to relay...");
+    terminalEventRef.current = false;
     setIsConnectingRemote(true);
 
     try {
@@ -242,7 +265,7 @@ const SendPage: React.FC = () => {
       console.log("Send completed:", result);
     } catch (err) {
       console.error("Send error:", err);
-      setTransferStatus("Error: " + err);
+      if (!terminalEventRef.current) setTransferStatus("Error: " + err);
       setProgress(null);
     } finally {
       setIsConnectingRemote(false);
