@@ -19,6 +19,8 @@ class SettingsService extends ChangeNotifier {
   }
 
   Future<void> _ensureDefaults() async {
+    // Default Mode was removed; screens always open on Local. Drop the stale key.
+    await _prefs.remove('defaultTransferMode');
     // Migrate away from the stale relay default an earlier build persisted;
     // clearing it lets the PlenumConfig-derived getter default take over.
     if (_prefs.getString('relayServerUrl') == 'wss://plenum-relay.fly.dev/ws') {
@@ -73,12 +75,6 @@ class SettingsService extends ChangeNotifier {
     if (mode == ThemeMode.light) val = 1;
     if (mode == ThemeMode.dark) val = 2;
     await _prefs.setInt('themeMode', val);
-    notifyListeners();
-  }
-
-  int get defaultTransferMode => _prefs.getInt('defaultTransferMode') ?? 0; // 0 = local, 1 = internet
-  Future<void> setDefaultTransferMode(int value) async {
-    await _prefs.setInt('defaultTransferMode', value);
     notifyListeners();
   }
 

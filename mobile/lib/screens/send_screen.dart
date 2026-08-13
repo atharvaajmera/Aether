@@ -57,20 +57,6 @@ class _SendScreenState extends State<SendScreen> {
     _startDiscovery();
   }
 
-  bool _initializedMode = false;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (!_initializedMode) {
-      final settings = context.read<SettingsService>();
-      setState(() {
-        _mode = settings.defaultTransferMode == 0 ? TransferMode.local : TransferMode.internet;
-      });
-      _initializedMode = true;
-    }
-  }
-
   @override
   void dispose() {
     final token = _sessionToken;

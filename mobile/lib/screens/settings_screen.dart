@@ -101,23 +101,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 },
               ),
             ),
-            _divider(),
-            ListTile(
-              title: const Text('Default Mode', style: TextStyle(color: AppTheme.textPrimary)),
-              trailing: DropdownButton<int>(
-                value: settings.defaultTransferMode,
-                dropdownColor: AppTheme.bgCardHover,
-                underline: const SizedBox(),
-                style: const TextStyle(color: AppTheme.textPrimary),
-                items: const [
-                  DropdownMenuItem(value: 0, child: Text('Local Network')),
-                  DropdownMenuItem(value: 1, child: Text('Internet')),
-                ],
-                onChanged: (val) {
-                  if (val != null) settings.setDefaultTransferMode(val);
-                },
-              ),
-            ),
           ]),
 
           const SizedBox(height: 24),

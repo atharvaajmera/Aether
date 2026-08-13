@@ -29,19 +29,6 @@ class ReceiveScreen extends StatefulWidget {
 
 class _ReceiveScreenState extends State<ReceiveScreen> {
   TransferMode _mode = TransferMode.local;
-  bool _initializedMode = false;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (!_initializedMode) {
-      final settings = context.read<SettingsService>();
-      setState(() {
-        _mode = settings.defaultTransferMode == 0 ? TransferMode.local : TransferMode.internet;
-      });
-      _initializedMode = true;
-    }
-  }
 
   bool _isListening = false;
   String _statusMessage = 'Tap radar to start receiving';
