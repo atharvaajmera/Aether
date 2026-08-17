@@ -1,8 +1,8 @@
 //! Mapping from `crate::signaling` NAT-traversal types to webrtc-rs configuration types.
 
 use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
 
 use crate::signaling::{IceServer, NatTraversalConfig};
 

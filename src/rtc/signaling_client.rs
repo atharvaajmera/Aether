@@ -9,22 +9,22 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
+use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
-use webrtc::api::APIBuilder;
-use webrtc::ice::candidate::CandidateType;
-use webrtc::ice::network_type::NetworkType;
+use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
-use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice::candidate::CandidateType;
+use webrtc::ice::network_type::NetworkType;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::stats::StatsReportType;
 
 use crate::rtc::error::RtcError;
@@ -50,10 +50,7 @@ async fn connect_ws_with_fallback(
     {
         Ok(Ok((ws_stream, _response))) => return Ok((ws_stream, false)),
         Ok(Err(error)) => error.to_string(),
-        Err(_) => format!(
-            "timed out after {}s",
-            WS_CONNECT_ATTEMPT_TIMEOUT.as_secs()
-        ),
+        Err(_) => format!("timed out after {}s", WS_CONNECT_ATTEMPT_TIMEOUT.as_secs()),
     };
 
     if !crate::rtc::resolve::fallback_applies(relay_url) {
@@ -96,7 +93,9 @@ async fn connect_ws_with_fallback(
     .await
     .map_err(|_| RtcError::WebSocket("fallback IP TLS/WebSocket handshake timed out".into()))?
     .map_err(|error| {
-        RtcError::WebSocket(format!("fallback IP TLS/WebSocket handshake failed: {error}"))
+        RtcError::WebSocket(format!(
+            "fallback IP TLS/WebSocket handshake failed: {error}"
+        ))
     })?;
 
     let _ = diag_tx.send(format!(
@@ -159,10 +158,12 @@ fn wire_data_channel(
         Box::pin(async {})
     }));
 
-    data_channel.on_message(Box::new(move |msg: webrtc::data_channel::data_channel_message::DataChannelMessage| {
-        let _ = inbound_tx.send(msg.data.to_vec());
-        Box::pin(async {})
-    }));
+    data_channel.on_message(Box::new(
+        move |msg: webrtc::data_channel::data_channel_message::DataChannelMessage| {
+            let _ = inbound_tx.send(msg.data.to_vec());
+            Box::pin(async {})
+        },
+    ));
 }
 
 /// Flush ICE candidates that were received and buffered before the remote
@@ -328,10 +329,12 @@ fn wire_state_logging(
     diag_tx: std::sync::mpsc::Sender<String>,
 ) {
     let ice_diag_tx = diag_tx.clone();
-    peer_connection.on_ice_connection_state_change(Box::new(move |state: RTCIceConnectionState| {
-        let _ = ice_diag_tx.send(format!("DIAG {role}: ice_connection_state -> {state:?}"));
-        Box::pin(async {})
-    }));
+    peer_connection.on_ice_connection_state_change(Box::new(
+        move |state: RTCIceConnectionState| {
+            let _ = ice_diag_tx.send(format!("DIAG {role}: ice_connection_state -> {state:?}"));
+            Box::pin(async {})
+        },
+    ));
     peer_connection.on_peer_connection_state_change(Box::new(
         move |state: RTCPeerConnectionState| {
             let _ = diag_tx.send(format!("DIAG {role}: peer_connection_state -> {state:?}"));
@@ -366,7 +369,9 @@ fn spawn_stats_poller(
             });
 
             let Some(pair) = nominated else {
-                let _ = diag_tx.send(format!("DIAG {role}: stats -> no nominated candidate pair yet"));
+                let _ = diag_tx.send(format!(
+                    "DIAG {role}: stats -> no nominated candidate pair yet"
+                ));
                 continue;
             };
 
@@ -398,8 +403,7 @@ fn spawn_stats_poller(
                     .unwrap_or_else(|| "unknown".to_string())
             };
 
-            let is_relayed = candidate_type(&pair.local_candidate_id)
-                == Some(CandidateType::Relay)
+            let is_relayed = candidate_type(&pair.local_candidate_id) == Some(CandidateType::Relay)
                 || candidate_type(&pair.remote_candidate_id) == Some(CandidateType::Relay);
             relayed.store(is_relayed, Ordering::Relaxed);
 
@@ -473,9 +477,8 @@ pub async fn run_offerer(
     let configuration: RTCConfiguration =
         crate::rtc::config::to_rtc_configuration_with_policy(&ice_servers, force_relay);
     if force_relay {
-        let _ = diag_tx.send(
-            "DIAG rtc: ICE restricted to TURN relay candidates for this attempt".to_string(),
-        );
+        let _ = diag_tx
+            .send("DIAG rtc: ICE restricted to TURN relay candidates for this attempt".to_string());
     }
     let peer_connection = Arc::new(
         api.new_peer_connection(configuration)
@@ -486,7 +489,8 @@ pub async fn run_offerer(
     let (inbound_tx, inbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (open_tx, mut open_rx) = mpsc::unbounded_channel::<()>();
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<SignalMessage>();
-    let remote_peer_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let remote_peer_id: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
 
     wire_ice_candidate_outbound(
         &peer_connection,
@@ -666,9 +670,8 @@ pub async fn run_answerer(
     let configuration: RTCConfiguration =
         crate::rtc::config::to_rtc_configuration_with_policy(&ice_servers, force_relay);
     if force_relay {
-        let _ = diag_tx.send(
-            "DIAG rtc: ICE restricted to TURN relay candidates for this attempt".to_string(),
-        );
+        let _ = diag_tx
+            .send("DIAG rtc: ICE restricted to TURN relay candidates for this attempt".to_string());
     }
     let peer_connection = Arc::new(
         api.new_peer_connection(configuration)
@@ -679,7 +682,8 @@ pub async fn run_answerer(
     let (inbound_tx, inbound_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (open_tx, mut open_rx) = mpsc::unbounded_channel::<()>();
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<SignalMessage>();
-    let remote_peer_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let remote_peer_id: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
 
     wire_ice_candidate_outbound(
         &peer_connection,
@@ -696,7 +700,11 @@ pub async fn run_answerer(
         Arc::new(std::sync::Mutex::new(None));
     let pending_data_channel_setter = Arc::clone(&pending_data_channel);
     peer_connection.on_data_channel(Box::new(move |data_channel: Arc<RTCDataChannel>| {
-        wire_data_channel(&data_channel, inbound_tx_for_channel.clone(), open_tx_for_channel.clone());
+        wire_data_channel(
+            &data_channel,
+            inbound_tx_for_channel.clone(),
+            open_tx_for_channel.clone(),
+        );
         if data_channel.ready_state() == RTCDataChannelState::Open {
             let _ = open_tx_for_channel.send(());
         }

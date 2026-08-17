@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::rtc::error::RtcError;
 use crate::rtc::runtime::BackgroundRuntime;
-use crate::rtc::signaling_client::{run_answerer, run_offerer, ConnectedChannel};
+use crate::rtc::signaling_client::{ConnectedChannel, run_answerer, run_offerer};
 use crate::signaling::IceServer;
 use crate::transport::{Transport, TransportError, TransportResult};
 
@@ -149,9 +149,25 @@ impl RtcTransport {
 
         let runtime = BackgroundRuntime::spawn("plenum-rtc", move || async move {
             let connected = if is_offerer {
-                run_offerer(&relay_url, &session_id, &my_peer_id, ice_servers, force_relay, offer_exchanged_for_task).await
+                run_offerer(
+                    &relay_url,
+                    &session_id,
+                    &my_peer_id,
+                    ice_servers,
+                    force_relay,
+                    offer_exchanged_for_task,
+                )
+                .await
             } else {
-                run_answerer(&relay_url, &session_id, &my_peer_id, ice_servers, force_relay, offer_exchanged_for_task).await
+                run_answerer(
+                    &relay_url,
+                    &session_id,
+                    &my_peer_id,
+                    ice_servers,
+                    force_relay,
+                    offer_exchanged_for_task,
+                )
+                .await
             };
 
             let ConnectedChannel {
@@ -234,7 +250,7 @@ impl RtcTransport {
                     break;
                 }
             }
-            // Bounded wait (~5s) for the send buffer to empty. 
+            // Bounded wait (~5s) for the send buffer to empty.
             for _ in 0..500 {
                 if data_channel.buffered_amount().await == 0 {
                     break;
@@ -323,10 +339,7 @@ impl Transport for RtcTransport {
         if self.dead_pair.load(Ordering::Relaxed) {
             return Err(TransportError::DeadPath);
         }
-        match self
-            .inbound_rx
-            .recv_timeout(Duration::from_millis(1))
-        {
+        match self.inbound_rx.recv_timeout(Duration::from_millis(1)) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(std_mpsc::RecvTimeoutError::Timeout) => Ok(None),
             Err(std_mpsc::RecvTimeoutError::Disconnected) => {

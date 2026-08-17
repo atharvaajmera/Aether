@@ -22,7 +22,9 @@ async fn spawn_test_server() -> String {
     let state = Arc::new(AppState::new(None, Vec::new()));
     let app = relay_server::build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
     let addr: SocketAddr = listener.local_addr().expect("local addr");
 
     tokio::spawn(async move {
@@ -37,7 +39,9 @@ async fn send_signal(
     msg: &SignalMessage,
 ) {
     let json = msg.to_json().expect("serialize signal");
-    ws.send(WsMessage::Text(json.into())).await.expect("send ws message");
+    ws.send(WsMessage::Text(json.into()))
+        .await
+        .expect("send ws message");
 }
 
 async fn recv_signal(

@@ -2,7 +2,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use crate::rtc::resolve::{fallback_applies, RELAY_FALLBACK_IP, RELAY_HOST};
+use crate::rtc::resolve::{RELAY_FALLBACK_IP, RELAY_HOST, fallback_applies};
 use crate::signaling::IceServer;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -98,7 +98,10 @@ mod tests {
     #[test]
     fn derives_http_endpoint_from_ws_url() {
         let url = turn_credentials_url("ws://localhost:8080/ws", "p").unwrap();
-        assert_eq!(url.as_str(), "http://localhost:8080/turn-credentials?peer_id=p");
+        assert_eq!(
+            url.as_str(),
+            "http://localhost:8080/turn-credentials?peer_id=p"
+        );
     }
 
     #[test]

@@ -20,7 +20,10 @@ pub use state::AppState;
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
-        .route("/turn-credentials", get(turn_creds::turn_credentials_handler))
+        .route(
+            "/turn-credentials",
+            get(turn_creds::turn_credentials_handler),
+        )
         .route("/healthz", get(healthz))
         .with_state(state)
 }

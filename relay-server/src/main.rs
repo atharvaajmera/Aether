@@ -28,12 +28,16 @@ async fn main() {
     let _ = Cli::parse();
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let bind_addr = std::env::var("RELAY_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let public_url = std::env::var("RELAY_PUBLIC_URL").unwrap_or_else(|_| "(not set)".to_string());
-    let turn_secret = std::env::var("TURN_SHARED_SECRET").ok().filter(|s| !s.is_empty());
+    let turn_secret = std::env::var("TURN_SHARED_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty());
     let turn_urls: Vec<String> = std::env::var("TURN_URLS")
         .unwrap_or_default()
         .split(',')

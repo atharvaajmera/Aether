@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use plenum::signaling::{RoutedSignal, SignalMessage};
@@ -14,25 +14,54 @@ use tracing::{debug, info, warn};
 /// ids where present, so relay logs show the full negotiation flow.
 fn signal_label(msg: &SignalMessage) -> String {
     match msg {
-        SignalMessage::JoinSession { peer_id, session_id } => {
+        SignalMessage::JoinSession {
+            peer_id,
+            session_id,
+        } => {
             format!("JoinSession(peer={peer_id}, session={session_id})")
         }
-        SignalMessage::LeaveSession { peer_id, session_id } => {
+        SignalMessage::LeaveSession {
+            peer_id,
+            session_id,
+        } => {
             format!("LeaveSession(peer={peer_id}, session={session_id})")
         }
-        SignalMessage::PeerJoined { peer_id, session_id } => {
+        SignalMessage::PeerJoined {
+            peer_id,
+            session_id,
+        } => {
             format!("PeerJoined(peer={peer_id}, session={session_id})")
         }
-        SignalMessage::PeerLeft { peer_id, session_id } => {
+        SignalMessage::PeerLeft {
+            peer_id,
+            session_id,
+        } => {
             format!("PeerLeft(peer={peer_id}, session={session_id})")
         }
-        SignalMessage::Offer { from_peer_id, to_peer_id, nat, .. } => {
-            format!("Offer(from={from_peer_id}, to={to_peer_id}, nat={})", nat.is_some())
+        SignalMessage::Offer {
+            from_peer_id,
+            to_peer_id,
+            nat,
+            ..
+        } => {
+            format!(
+                "Offer(from={from_peer_id}, to={to_peer_id}, nat={})",
+                nat.is_some()
+            )
         }
-        SignalMessage::Answer { from_peer_id, to_peer_id, .. } => {
+        SignalMessage::Answer {
+            from_peer_id,
+            to_peer_id,
+            ..
+        } => {
             format!("Answer(from={from_peer_id}, to={to_peer_id})")
         }
-        SignalMessage::IceCandidate { from_peer_id, to_peer_id, candidate, .. } => {
+        SignalMessage::IceCandidate {
+            from_peer_id,
+            to_peer_id,
+            candidate,
+            ..
+        } => {
             format!("IceCandidate(from={from_peer_id}, to={to_peer_id}, cand={candidate:?})")
         }
         SignalMessage::Error { message } => format!("Error({message})"),
@@ -112,7 +141,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         };
 
         match parsed {
-            SignalMessage::JoinSession { peer_id, session_id } => {
+            SignalMessage::JoinSession {
+                peer_id,
+                session_id,
+            } => {
                 if joined.is_some() {
                     let _ = send_error(
                         &outbound_tx,
@@ -123,7 +155,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
                 match do_join(&state, &outbound_tx, peer_id.clone(), session_id.clone()).await {
                     Ok(()) => {
-                        joined = Some(JoinedPeer { peer_id, session_id });
+                        joined = Some(JoinedPeer {
+                            peer_id,
+                            session_id,
+                        });
                     }
                     Err(err) => {
                         let _ = send_error(&outbound_tx, err.to_string());
@@ -164,7 +199,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     // a later JoinSession on the same connection isn't rejected
                     // and so we don't double-send LeaveSession on disconnect.
                     if let Some(j) = joined.take() {
-                        state.peers.lock().expect("peers mutex poisoned").remove(&j.peer_id);
+                        state
+                            .peers
+                            .lock()
+                            .expect("peers mutex poisoned")
+                            .remove(&j.peer_id);
                     }
                 }
             }
@@ -174,9 +213,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // Connection is closing (gracefully or not). If we ever joined a session
     // and haven't already left it, synthesize a LeaveSession so the other
     // peer(s) reliably get PeerLeft.
-    if let Some(JoinedPeer { peer_id, session_id }) = joined {
+    if let Some(JoinedPeer {
+        peer_id,
+        session_id,
+    }) = joined
+    {
         info!("DISCONNECT peer={peer_id} session={session_id}");
-        state.peers.lock().expect("peers mutex poisoned").remove(&peer_id);
+        state
+            .peers
+            .lock()
+            .expect("peers mutex poisoned")
+            .remove(&peer_id);
 
         let routed = {
             let mut signaling = state.signaling.lock().expect("signaling mutex poisoned");
@@ -250,7 +297,11 @@ async fn do_join(
         Ok(notifications) => notifications,
         Err(err) => {
             // Roll back peer registration on failure.
-            state.peers.lock().expect("peers mutex poisoned").remove(&peer_id);
+            state
+                .peers
+                .lock()
+                .expect("peers mutex poisoned")
+                .remove(&peer_id);
             return Err(err);
         }
     };

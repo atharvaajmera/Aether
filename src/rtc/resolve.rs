@@ -38,7 +38,9 @@ mod tests {
     #[test]
     fn fallback_applies_only_to_official_relay() {
         assert!(fallback_applies("wss://relay.plenumonline.me/ws"));
-        assert!(fallback_applies("https://relay.plenumonline.me/turn-credentials"));
+        assert!(fallback_applies(
+            "https://relay.plenumonline.me/turn-credentials"
+        ));
         assert!(!fallback_applies("wss://example.com/ws"));
         assert!(!fallback_applies("not a url"));
         assert!(!fallback_applies(""));
@@ -75,7 +77,10 @@ mod tests {
             },
         ];
         let rewritten = rewrite_ice_servers_to_fallback_ip(&servers);
-        assert_eq!(rewritten[0].urls[0], format!("stun:{RELAY_FALLBACK_IP}:3478"));
+        assert_eq!(
+            rewritten[0].urls[0],
+            format!("stun:{RELAY_FALLBACK_IP}:3478")
+        );
         assert_eq!(
             rewritten[1].urls[0],
             format!("turn:{RELAY_FALLBACK_IP}:3478?transport=udp")
