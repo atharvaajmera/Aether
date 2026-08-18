@@ -2,21 +2,78 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use plenum::protocol::{Packet, PacketType, encode_packet, parse_packet};
 use plenum::transport::{TcpTransport, Transport, TransportError};
 
+#[test]
+fn io_errors_preserve_category_and_operation() {
+    assert_eq!(
+        TransportError::from_write_io(
+            "write payload",
+            Duration::from_secs(30),
+            std::io::Error::from(std::io::ErrorKind::TimedOut),
+        ),
+        TransportError::WriteTimedOut {
+            timeout: Duration::from_secs(30),
+            operation: "write payload",
+        }
+    );
+    assert_eq!(
+        TransportError::from_io(
+            "write payload",
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+        ),
+        TransportError::ConnectionReset {
+            operation: "write payload"
+        }
+    );
+    assert_eq!(
+        TransportError::from_io(
+            "write prefix",
+            std::io::Error::from(std::io::ErrorKind::BrokenPipe),
+        ),
+        TransportError::BrokenPipe {
+            operation: "write prefix"
+        }
+    );
+
+    let other = TransportError::from_io(
+        "flush",
+        std::io::Error::new(std::io::ErrorKind::Other, "diagnostic detail"),
+    );
+    assert!(matches!(
+        other,
+        TransportError::Io {
+            operation: "flush",
+            kind: std::io::ErrorKind::Other,
+            ..
+        }
+    ));
+}
+
 fn wait_recv(transport: &mut TcpTransport) -> Vec<u8> {
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
         if let Some(frame) = transport.recv().expect("recv should not fail") {
             return frame;
         }
-
-        thread::sleep(Duration::from_millis(5));
+        assert!(Instant::now() < deadline, "timed out waiting for TCP frame");
+        thread::sleep(Duration::from_millis(1));
     }
+}
 
-    panic!("timed out waiting for TCP frame");
+#[test]
+fn empty_nonblocking_socket_returns_none() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || TcpTransport::accept(&listener).unwrap());
+    let _client = TcpStream::connect(address).unwrap();
+    let mut transport = server.join().unwrap();
+
+    assert_eq!(transport.recv().unwrap(), None);
+    assert!(!transport.is_closed());
 }
 
 #[test]
@@ -77,9 +134,7 @@ fn carries_encoded_protocol_packets_over_tcp() {
 }
 
 /// Regression: a single length-prefixed frame whose bytes arrive split across
-/// multiple socket reads (straddling the transport's internal read timeout)
-/// must still be reassembled intact. The earlier implementation discarded the
-/// partial bytes on a read timeout, desyncing the framing.
+/// multiple socket reads and nonblocking polls must still be reassembled intact.
 #[test]
 fn reassembles_frame_split_across_reads() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
@@ -98,8 +153,7 @@ fn reassembles_frame_split_across_reads() {
     let payload = b"hello world";
     let len = (payload.len() as u32).to_be_bytes();
 
-    // Send 2 of the 4 length-prefix bytes, pause past the 5ms read timeout,
-    // then the rest of the prefix, pause, then the body in two pieces.
+    // Send the prefix and body in separate pieces with empty polls between them.
     raw.write_all(&len[..2]).unwrap();
     raw.flush().unwrap();
     thread::sleep(Duration::from_millis(20));
@@ -165,4 +219,60 @@ fn rejects_frames_larger_than_configured_limit() {
     assert_eq!(err, TransportError::FrameTooLarge { len: 4, max: 3 });
     drop(client);
     server.join().expect("server thread should finish");
+}
+
+#[test]
+fn rejects_oversized_inbound_length_prefix() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut server = TcpTransport::accept(&listener).unwrap();
+        server.set_max_frame_len(3);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match server.recv() {
+                Err(error) => return error,
+                Ok(None) => {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Ok(Some(_)) => panic!("oversized frame must not be returned"),
+            }
+        }
+    });
+
+    let mut raw = TcpStream::connect(address).unwrap();
+    raw.write_all(&(4_u32).to_be_bytes()).unwrap();
+    assert_eq!(
+        server.join().unwrap(),
+        TransportError::FrameTooLarge { len: 4, max: 3 }
+    );
+}
+
+#[test]
+fn returns_final_frame_before_clean_eof() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut server = TcpTransport::accept(&listener).unwrap();
+        assert_eq!(wait_recv(&mut server), b"final".to_vec());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match server.recv() {
+                Err(TransportError::CleanEof { operation: "read" }) => break,
+                Ok(None) => {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                result => panic!("unexpected result after final frame: {result:?}"),
+            }
+        }
+    });
+
+    let mut raw = TcpStream::connect(address).unwrap();
+    raw.write_all(&(5_u32).to_be_bytes()).unwrap();
+    raw.write_all(b"final").unwrap();
+    drop(raw);
+    server.join().unwrap();
 }
