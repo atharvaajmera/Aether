@@ -72,17 +72,20 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
   @override
   void dispose() {
-    TransferLock.release();
+    final active = _isListening || _remoteStarted;
     final token = _sessionToken;
-    if (token != null) {
+    if (token != null && !active) {
       try {
         cancelSession(sessionToken: token);
       } catch (_) {}
     }
     // Clean up app-dir copy if it was already exported to Downloads.
     _deleteAppDirCopyIfExported();
-    _localSub?.cancel();
-    _remoteSub?.cancel();
+    if (!active) {
+      TransferLock.release();
+      _localSub?.cancel();
+      _remoteSub?.cancel();
+    }
     _reArmTimer?.cancel();
     super.dispose();
   }
@@ -163,6 +166,17 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       _statusMessage = 'Listening for incoming files...';
     });
 
+    try {
+      await TransferLock.acquire();
+    } catch (error) {
+      if (mounted) {
+        _handleLogEvent({
+          'level': 'Warn',
+          'message': 'Transfer lock unavailable; the transfer may pause when the screen is off: $error',
+        });
+      }
+    }
+
     final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
     _sessionToken = sessionToken;
     _localSub = startReceive(
@@ -193,7 +207,11 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       } else if (event['Transfer'] != null) {
         _handleTransferEvent(event['Transfer'], outputDir);
       }
+    }, onDone: () {
+      TransferLock.release();
+      if (mounted) setState(() => _isListening = false);
     }, onError: (e) {
+      TransferLock.release();
       setState(() {
         _statusMessage = 'Error: $e';
         _isListening = false;
@@ -236,12 +254,18 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         _progress = null;
       });
     } else if (transEvent['Started'] != null) {
-      TransferLock.acquire();
       setState(() {
         _statusMessage = 'Receiving ${transEvent['Started']['file_name']}...';
         _progress = 0.0;
         _totalBytes = transEvent['Started']['total_bytes'];
         _transferStartTime = DateTime.now();
+        _speedText = null;
+        _etaText = null;
+      });
+    } else if (transEvent['Failed'] != null) {
+      setState(() {
+        _statusMessage = transEvent['Failed']['message'] ?? 'Transfer failed';
+        _progress = null;
         _speedText = null;
         _etaText = null;
       });
@@ -445,6 +469,17 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       iceServers,
     );
 
+    try {
+      await TransferLock.acquire();
+    } catch (error) {
+      if (mounted) {
+        _handleLogEvent({
+          'level': 'Warn',
+          'message': 'Transfer lock unavailable; the transfer may pause when the screen is off: $error',
+        });
+      }
+    }
+
     final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
     _sessionToken = sessionToken;
     _remoteSub = startReceiveRemote(
@@ -467,8 +502,17 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       if (event['Transfer'] != null) {
         _handleTransferEvent(event['Transfer'], outputDir);
       }
+    }, onDone: () {
+      TransferLock.release();
+      if (mounted) setState(() => _remoteStarted = false);
     }, onError: (e) {
-      if (mounted) setState(() => _statusMessage = 'Error: $e');
+      TransferLock.release();
+      if (mounted) {
+        setState(() {
+          _statusMessage = 'Error: $e';
+          _remoteStarted = false;
+        });
+      }
     });
   }
 

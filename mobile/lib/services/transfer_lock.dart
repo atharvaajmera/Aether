@@ -6,13 +6,12 @@ import 'package:flutter/services.dart';
 class TransferLock {
   static const MethodChannel _channel = MethodChannel('plenum/media');
 
-  /// Acquire the locks. Safe to call repeatedly; the native side is idempotent.
+  /// Acquire both locks. errors are surfaced
   static Future<void> acquire() async {
     if (!Platform.isAndroid) return;
-    try {
-      await _channel.invokeMethod('acquireTransferLock');
-    } catch (_) {
-      // Best-effort: a lock failure must never block a transfer.
+    final acquired = await _channel.invokeMethod<bool>('acquireTransferLock');
+    if (acquired != true) {
+      throw StateError('Android transfer lock was not acquired');
     }
   }
 

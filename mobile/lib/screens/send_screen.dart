@@ -60,15 +60,15 @@ class _SendScreenState extends State<SendScreen> {
   @override
   void dispose() {
     final token = _sessionToken;
-    if (token != null) {
+    if (token != null && !_transferActive) {
       try {
         cancelSession(sessionToken: token);
       } catch (_) {}
     }
-    _transferSub?.cancel();
+    if (!_transferActive) _transferSub?.cancel();
     _autoResetTimer?.cancel();
     _roomCodeController.dispose();
-    TransferLock.release();
+    if (!_transferActive) TransferLock.release();
     super.dispose();
   }
 
@@ -214,6 +214,13 @@ class _SendScreenState extends State<SendScreen> {
           _isConnectingRemote = false;
           _transferActive = false;
         });
+      } else if (trans['Failed'] != null) {
+        setState(() {
+          _transferStatus = trans['Failed']['message'] ?? 'Transfer failed';
+          _progress = null;
+          _isConnectingRemote = false;
+          _transferActive = false;
+        });
       } else if (trans['Started'] != null) {
         setState(() {
           _transferStatus = 'Sending ${trans['Started']['file_name']}...';
@@ -288,7 +295,7 @@ class _SendScreenState extends State<SendScreen> {
     }
   }
 
-  void _sendToPeer(String address, String hostname, String? pin) {
+  Future<void> _sendToPeer(String address, String hostname, String? pin) async {
     if (_selectedFile == null) return;
     _currentTransferPeerName = hostname;
 
@@ -299,7 +306,17 @@ class _SendScreenState extends State<SendScreen> {
       _transferActive = true;
       _showSuccess = false;
     });
-    TransferLock.acquire();
+    try {
+      await TransferLock.acquire();
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _transferStatus = 'Transfer lock unavailable: $error';
+          _transferActive = false;
+        });
+      }
+      return;
+    }
     _transferSub = startSend(
       filePath: _selectedFile!,
       peerAddress: address,
@@ -365,7 +382,7 @@ class _SendScreenState extends State<SendScreen> {
         _transferActive = true;
         _showSuccess = false;
       });
-      TransferLock.acquire();
+      await TransferLock.acquire();
       _transferSub = startSendRemote(
         filePath: _selectedFile!,
         relayServerUrl: relayServerUrl,
@@ -416,7 +433,7 @@ class _SendScreenState extends State<SendScreen> {
       final pin = pinController.text.trim();
       if (pinRequired && pin.isEmpty) return; // must enter a code
       Navigator.pop(dialogContext);
-      _sendToPeer(address, hostname, pin.isNotEmpty ? pin : null);
+      unawaited(_sendToPeer(address, hostname, pin.isNotEmpty ? pin : null));
     }
 
     showDialog(

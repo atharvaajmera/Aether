@@ -29,8 +29,12 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "acquireTransferLock" -> {
-                        acquireTransferLock()
-                        result.success(true)
+                        try {
+                            acquireTransferLock()
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("LOCK_FAILED", e.message, null)
+                        }
                     }
                     "releaseTransferLock" -> {
                         releaseTransferLock()
@@ -107,7 +111,9 @@ class MainActivity : FlutterActivity() {
                 "plenum:transfer"
             )
         }
-        wakeLock?.let { if (!it.isHeld) it.acquire(20 * 60 * 1000L /* 20 min backstop */) }
+        // The Rust operation owns the transfer lifetime. A timed wake lock can
+        // expire during a slow multi-gigabyte transfer and strand the socket.
+        wakeLock?.let { if (!it.isHeld) it.acquire() }
     }
 
     /// Releases both locks if held. Idempotent.
@@ -117,8 +123,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        // Never leak the locks if the activity is torn down mid-transfer.
-        releaseTransferLock()
+        // Dart releases locks when the Rust stream completes. Releasing here
+        // would interrupt a transfer during activity recreation.
         super.onDestroy()
     }
 
