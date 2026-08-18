@@ -102,6 +102,7 @@ export type TransferEvent =
     | { AwaitingApproval: { direction: TransferDirection, file_name: string } }
     | { Cancelled: { direction: TransferDirection } }
     | { Declined: { direction: TransferDirection, reason: string } }
+    | { Failed: { direction: TransferDirection, message: string, recoverable: boolean } }
     | { Started: { direction: TransferDirection, file_name: string, total_bytes: number, resumed_bytes: number } }
     | { Resumed: { direction: TransferDirection, next_sequence: number, resumed_bytes: number } }
     | { Progress: { direction: TransferDirection, transferred_bytes: number, total_bytes: number } }

@@ -569,3 +569,43 @@ select.pill-select option {
   margin-bottom: 24px;
   text-align: center;
 }
+
+.technical-details {
+  width: min(100%, 420px);
+  margin-top: 14px;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.technical-details summary {
+  width: fit-content;
+  margin: 0 auto;
+  padding: 6px 8px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.technical-details summary:hover,
+.technical-details summary:focus-visible {
+  color: var(--text-primary);
+  background-color: var(--bg-card-hover);
+  outline: none;
+}
+
+.technical-details p {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background-color: var(--bg-card);
+  color: var(--text-secondary);
+  font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  user-select: text;
+}

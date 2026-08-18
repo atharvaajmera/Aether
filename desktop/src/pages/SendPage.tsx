@@ -9,6 +9,18 @@ import { formatBytes, formatDuration } from "../utils/format";
 import { useSettings } from "../context/SettingsContext";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
+type LogEvent = { level: string; message: string };
+
+const logToConsole = (log: LogEvent) => {
+  if (log.level === "Error") {
+    console.error(log.message);
+  } else if (log.level === "Warn") {
+    console.warn(log.message);
+  } else {
+    console.info(log.message);
+  }
+};
+
 const STATE_LABELS: Record<string, string> = {
   Discovering: "Searching for devices...",
   Listening: "Ready to send files",
@@ -73,7 +85,7 @@ const SendPage: React.FC = () => {
                return [...prev, disc.PeerFound];
              });
            }
-        } else if ("Transfer" in payload) {
+         } else if ("Transfer" in payload) {
            const trans: TransferEvent = payload.Transfer;
             if ("StateChanged" in trans) {
               if (trans.StateChanged.state !== "Closed") {
@@ -117,6 +129,13 @@ const SendPage: React.FC = () => {
               setSpeedText(null);
               setEtaText(null);
               transferStartRef.current = null;
+           } else if ("Failed" in trans) {
+              terminalEventRef.current = true;
+              setTransferStatus(trans.Failed.message);
+              setProgress(null);
+              setSpeedText(null);
+              setEtaText(null);
+              transferStartRef.current = null;
            } else if ("Cancelled" in trans) {
               terminalEventRef.current = true;
               setTransferStatus("Transfer cancelled");
@@ -152,8 +171,10 @@ const SendPage: React.FC = () => {
                setSendSuccess(false);
                setTransferStatus("");
              }, 4000);
-           }
-        }
+            }
+         } else if ("Log" in payload) {
+           logToConsole(payload.Log);
+         }
       });
 
       const unlistenDrop = await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {

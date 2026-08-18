@@ -5,9 +5,39 @@ use plenum::app::types::{
     TransferSummary,
 };
 use plenum::signaling::IceServer;
+use serde_json::json;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use tauri::{AppHandle, Emitter};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager};
+
+fn unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn create_transfer_log(app: &AppHandle, role: &str) -> Option<(PathBuf, BufWriter<File>)> {
+    let directory = app.path().app_log_dir().ok()?;
+    fs::create_dir_all(&directory).ok()?;
+    let path = directory.join(format!("{role}-{}.jsonl", unix_millis()));
+    let file = File::create(&path).ok()?;
+    Some((path, BufWriter::new(file)))
+}
+
+fn write_diagnostic(log: &mut Option<(PathBuf, BufWriter<File>)>, value: serde_json::Value) {
+    let Some((_, writer)) = log.as_mut() else {
+        return;
+    };
+    if serde_json::to_writer(&mut *writer, &value).is_ok() {
+        let _ = writer.write_all(b"\n");
+        let _ = writer.flush();
+    }
+}
 
 fn current_session() -> &'static Mutex<Option<(u64, SessionControl)>> {
     static SESSION: OnceLock<Mutex<Option<(u64, SessionControl)>>> = OnceLock::new();
@@ -65,7 +95,9 @@ pub async fn send_file_command(
         let mut sink = |event: PlenumEvent| {
             let _ = app.emit("plenum-event", event);
         };
-        let result = core.send_file(request, &mut sink).map_err(|e| e.to_string());
+        let result = core
+            .send_file(request, &mut sink)
+            .map_err(|e| e.to_string());
         unregister_session(session_id);
         result
     })
@@ -82,14 +114,45 @@ pub async fn receive_file_command(
         request.device_name = default_device_name();
     }
     tauri::async_runtime::spawn_blocking(move || {
+        let mut diagnostic_log = create_transfer_log(&app, "lan-receive");
+        write_diagnostic(
+            &mut diagnostic_log,
+            json!({
+                "timestamp_ms": unix_millis(),
+                "kind": "command_started",
+                "role": "receiver",
+                "port": request.port,
+                "output_dir": &request.output_dir,
+            }),
+        );
         let mut core = PlenumCore::new();
         let session_id = register_session(core.control());
         let mut sink = |event: PlenumEvent| {
+            write_diagnostic(
+                &mut diagnostic_log,
+                json!({
+                    "timestamp_ms": unix_millis(),
+                    "kind": "event",
+                    "event": &event,
+                }),
+            );
             let _ = app.emit("plenum-event", event);
         };
         let result = core
             .receive_file(request, &mut sink)
             .map_err(|e| e.to_string());
+        drop(sink);
+        write_diagnostic(
+            &mut diagnostic_log,
+            json!({
+                "timestamp_ms": unix_millis(),
+                "kind": "command_finished",
+                "result": match &result {
+                    Ok(summary) => json!({ "ok": summary }),
+                    Err(error) => json!({ "error": error }),
+                },
+            }),
+        );
         unregister_session(session_id);
         result
     })

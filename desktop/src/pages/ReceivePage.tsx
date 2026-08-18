@@ -11,6 +11,18 @@ import { formatBytes, formatDuration } from "../utils/format";
 import TransferAcceptDialog, { IncomingTransfer } from "../components/TransferAcceptDialog";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
+type LogEvent = { level: string; message: string };
+
+const logToConsole = (log: LogEvent) => {
+  if (log.level === "Error") {
+    console.error(log.message);
+  } else if (log.level === "Warn") {
+    console.warn(log.message);
+  } else {
+    console.info(log.message);
+  }
+};
+
 const STATE_LABELS: Record<string, string> = {
   Discovering: "Searching...",
   Listening: "Ready to receive files",
@@ -38,6 +50,8 @@ const ReceivePage: React.FC = () => {
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [speedText, setSpeedText] = useState<string | null>(null);
   const [etaText, setEtaText] = useState<string | null>(null);
+  const [technicalDetails, setTechnicalDetails] = useState<string | null>(null);
+  const [transferFailed, setTransferFailed] = useState(false);
   const transferStartRef = useRef<number | null>(null);
   const terminalEventRef = useRef(false);
   const { settings } = useSettings();
@@ -123,8 +137,18 @@ const ReceivePage: React.FC = () => {
       setSpeedText(null);
       setEtaText(null);
       transferStartRef.current = null;
+    } else if ("Failed" in trans) {
+      terminalEventRef.current = true;
+      setTransferFailed(true);
+      setStatus(trans.Failed.message);
+      setProgress(null);
+      setSpeedText(null);
+      setEtaText(null);
+      transferStartRef.current = null;
     } else if ("Started" in trans) {
       terminalEventRef.current = false;
+      setTransferFailed(false);
+      setTechnicalDetails(null);
       setIncoming(null);
       setSavedPath(null);
       setStatus(trans.Started.resumed_bytes > 0
@@ -151,6 +175,8 @@ const ReceivePage: React.FC = () => {
       }
     } else if ("Completed" in trans) {
       terminalEventRef.current = true;
+      setTransferFailed(false);
+      setTechnicalDetails(null);
       const summary: TransferSummary = trans.Completed;
       const path = outputDirRef.current
         ? `${outputDirRef.current}${outputDirRef.current.endsWith("\\") || outputDirRef.current.endsWith("/") ? "" : "\\"}${summary.file_name}`
@@ -183,6 +209,14 @@ const ReceivePage: React.FC = () => {
   useEffect(() => { settingsRef.current = settings; }, [settings]);
   const handleTransferEventRef = useRef(handleTransferEvent);
   handleTransferEventRef.current = handleTransferEvent;
+  const handleLogEvent = (log: LogEvent) => {
+    logToConsole(log);
+    if (log.level === "Error") {
+      setTechnicalDetails(log.message);
+    }
+  };
+  const handleLogEventRef = useRef(handleLogEvent);
+  handleLogEventRef.current = handleLogEvent;
 
   useEffect(() => {
     invoke<string>("get_device_name").then(setDeviceName).catch(console.error);
@@ -209,9 +243,11 @@ const ReceivePage: React.FC = () => {
                setPin(disc.BroadcastStarted.token);
              }
            }
-        } else if ("Transfer" in payload) {
+         } else if ("Transfer" in payload) {
            handleTransferEventRef.current(payload.Transfer);
-        }
+         } else if ("Log" in payload) {
+           handleLogEventRef.current(payload.Log);
+         }
       });
 
       // 2. Resolve the real system Downloads directory
@@ -265,6 +301,8 @@ const ReceivePage: React.FC = () => {
         const payload = event.payload;
         if ("Transfer" in payload) {
           handleTransferEventRef.current(payload.Transfer);
+        } else if ("Log" in payload) {
+          handleLogEventRef.current(payload.Log);
         }
       });
 
@@ -359,6 +397,13 @@ const ReceivePage: React.FC = () => {
         <div style={{ marginTop: "20px", fontSize: "14px", color: "var(--text-secondary)", textAlign: "center" }}>
           {status}
         </div>
+
+        {import.meta.env.DEV && transferFailed && technicalDetails && (
+          <details className="technical-details">
+            <summary>Technical details</summary>
+            <p>{technicalDetails}</p>
+          </details>
+        )}
 
         {mode === "local" && pin && (
           <div style={{ marginTop: "16px", padding: "12px 24px", backgroundColor: "var(--bg-card)", borderRadius: "8px", border: "1px dashed var(--accent-primary)", display: "flex", flexDirection: "column", alignItems: "center" }}>
