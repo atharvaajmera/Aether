@@ -34,7 +34,9 @@ fn spawn_relay(runtime: &tokio::runtime::Runtime) -> String {
         let addr: SocketAddr = listener.local_addr().expect("local addr");
 
         tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("relay server error");
+            axum::serve(listener, app)
+                .await
+                .expect("relay server error");
         });
 
         format!("ws://{addr}/ws")
@@ -98,9 +100,7 @@ fn rtc_transport_roundtrip_over_loopback_relay() {
     let payload: Vec<u8> = (0..TOTAL_LEN).map(|i| (i % 256) as u8).collect();
 
     for chunk in payload.chunks(CHUNK_LEN) {
-        offerer
-            .send(chunk)
-            .expect("offerer send should succeed");
+        offerer.send(chunk).expect("offerer send should succeed");
     }
 
     let mut received = Vec::with_capacity(TOTAL_LEN);

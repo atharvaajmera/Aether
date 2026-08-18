@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use plenum::app::{
-    PlenumCore, PlenumEvent, BenchmarkEvent, BenchmarkRequest, ConnectionState, CorePermissions,
-    DiscoverRequest, DiscoveryEvent, LogLevel, ReceiveRequest, SendRequest, TransferEvent,
-    TransferOptions,
-};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
+use plenum::app::{
+    BenchmarkEvent, BenchmarkRequest, ConnectionState, CorePermissions, DiscoverRequest,
+    DiscoveryEvent, LogLevel, PlenumCore, PlenumEvent, ReceiveRequest, SendRequest, TransferEvent,
+    TransferOptions,
+};
 
 #[derive(Parser)]
 #[command(author, version, about = "Plenum peer-to-peer file transfer engine", long_about = None)]
@@ -134,7 +134,9 @@ impl plenum::app::EventSink for CliEventSink {
                     }
                     ConnectionState::SignalingConnected => {
                         if let Some(peer) = peer {
-                            self.println(format!("Connected to relay server, joining room {peer}..."));
+                            self.println(format!(
+                                "Connected to relay server, joining room {peer}..."
+                            ));
                         }
                     }
                     ConnectionState::NegotiatingIce => {
@@ -245,6 +247,12 @@ impl plenum::app::EventSink for CliEventSink {
                         pb.finish_and_clear();
                     }
                     self.println(format!("Transfer refused by peer ({reason})."));
+                }
+                TransferEvent::Failed { message, .. } => {
+                    if let Some(pb) = self.progress.take() {
+                        pb.finish_and_clear();
+                    }
+                    self.println(message);
                 }
             },
             PlenumEvent::Benchmark(event) => match event {

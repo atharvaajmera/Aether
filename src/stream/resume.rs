@@ -1,7 +1,9 @@
 //! Persistent resume checkpoints for interrupted transfers.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +45,31 @@ impl ResumeCheckpoint {
 
     pub fn save(&self, path: &Path) -> Result<(), StreamError> {
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json)?;
+        // Never truncate the live checkpoint in place. A process interruption,
+        // antivirus scan, or concurrent reader must leave either the previous
+        // complete checkpoint or the new complete checkpoint available.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp = path.with_extension(format!("checkpoint.{nonce}.tmp"));
+        {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(json.as_bytes())?;
+            file.flush()?;
+            file.sync_data()?;
+        }
+
+        // Windows cannot rename over an existing file. Removing the old file
+        // only after the temporary file is durable still avoids exposing a
+        // partially-written JSON checkpoint to readers.
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        if let Err(error) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(error.into());
+        }
         Ok(())
     }
 

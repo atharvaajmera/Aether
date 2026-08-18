@@ -11,10 +11,8 @@ use plenum::app::{
 };
 
 fn unique_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "plenum-stream-test-{label}-{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("plenum-stream-test-{label}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
@@ -26,7 +24,11 @@ fn patterned_bytes(len: usize) -> Vec<u8> {
 
 /// Runs a full send/receive round trip on 127.0.0.1 and returns every event
 /// both sides emitted (receiver events first, then sender events).
-fn transfer_roundtrip(label: &str, payload_len: usize, options: TransferOptions) -> Vec<PlenumEvent> {
+fn transfer_roundtrip(
+    label: &str,
+    payload_len: usize,
+    options: TransferOptions,
+) -> Vec<PlenumEvent> {
     let source_dir = unique_dir(&format!("{label}-src"));
     let output_dir = unique_dir(&format!("{label}-out"));
 

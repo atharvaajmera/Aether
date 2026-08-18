@@ -62,7 +62,22 @@ impl fmt::Display for AppError {
     }
 }
 
-impl std::error::Error for AppError {}
+impl std::error::Error for AppError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Discovery(error) => Some(error),
+            Self::Flow(error) => Some(error),
+            Self::Protocol(error) => Some(error),
+            Self::Rtc(error) => Some(error),
+            Self::Security(error) => Some(error),
+            Self::Signaling(error) => Some(error),
+            Self::Stream(error) => Some(error),
+            Self::Transport(error) => Some(error),
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<DiscoveryError> for AppError {
     fn from(error: DiscoveryError) -> Self {

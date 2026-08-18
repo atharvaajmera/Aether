@@ -301,6 +301,11 @@ pub enum TransferEvent {
         direction: TransferDirection,
         reason: String,
     },
+    Failed {
+        direction: TransferDirection,
+        message: String,
+        recoverable: bool,
+    },
     Started {
         direction: TransferDirection,
         file_name: String,

@@ -1,5 +1,5 @@
 use plenum::app::{
-    PlenumCore, AppError, BenchmarkRequest, CorePermissions, DiscoverRequest, PermissionKind,
+    AppError, BenchmarkRequest, CorePermissions, DiscoverRequest, PermissionKind, PlenumCore,
     TransferOptions,
 };
 use plenum::signaling::SignalMessage;

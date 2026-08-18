@@ -70,7 +70,11 @@ impl Announcement {
         buf.extend_from_slice(&self.tcp_port.to_be_bytes());
         buf.push(hostname_bytes.len() as u8);
         buf.extend_from_slice(hostname_bytes);
-        buf.push(if self.pin_required { FLAG_PIN_REQUIRED } else { 0 });
+        buf.push(if self.pin_required {
+            FLAG_PIN_REQUIRED
+        } else {
+            0
+        });
 
         buf
     }
