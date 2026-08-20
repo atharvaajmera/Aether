@@ -11,6 +11,7 @@ pub mod ws;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::{Path, State};
 use axum::routing::get;
 
 pub use state::AppState;
@@ -25,9 +26,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(turn_creds::turn_credentials_handler),
         )
         .route("/healthz", get(healthz))
+        .route("/room/:session_id", get(room_exists))
         .with_state(state)
 }
 
 async fn healthz() -> &'static str {
     "OK"
+}
+
+async fn room_exists(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> axum::http::StatusCode {
+    if state.room_exists(&session_id) {
+        axum::http::StatusCode::NO_CONTENT
+    } else {
+        axum::http::StatusCode::NOT_FOUND
+    }
 }

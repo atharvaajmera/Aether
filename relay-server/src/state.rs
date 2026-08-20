@@ -37,4 +37,11 @@ impl AppState {
             turn_urls,
         }
     }
+
+    pub fn room_exists(&self, session_id: &str) -> bool {
+        self.signaling
+            .lock()
+            .map(|signaling| signaling.peers_in_session(session_id).is_some())
+            .unwrap_or(false)
+    }
 }
