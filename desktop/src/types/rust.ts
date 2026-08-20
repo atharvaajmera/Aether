@@ -115,7 +115,14 @@ export type DiscoveryEvent =
     | { PeerFound: DiscoverySummary }
     | "PeerNotFound";
 
-export type PlenumEvent = 
+export type PlenumEvent =
     | { Log: { level: string, message: string } }
     | { Transfer: TransferEvent }
     | { Discovery: DiscoveryEvent };
+
+// Every plenum-event the desktop backend emits is wrapped with the id of the
+// backend session that produced it
+export interface PlenumEventEnvelope {
+    session_id: number;
+    event: PlenumEvent;
+}

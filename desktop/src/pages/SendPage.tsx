@@ -3,9 +3,10 @@ import { File, RefreshCcw, Monitor, Wifi, Globe, CheckCircle2 } from "lucide-rea
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { PlenumEvent, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, TransferEvent, IceServer } from "../types/rust";
+import { PlenumEventEnvelope, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, TransferEvent, IceServer } from "../types/rust";
 import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration } from "../utils/format";
+import { isStaleSession, abandonSession } from "../utils/session";
 import { useSettings } from "../context/SettingsContext";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
@@ -45,6 +46,8 @@ const SendPage: React.FC = () => {
   const [pinInput, setPinInput] = useState("");
   const [roomCodeInput, setRoomCodeInput] = useState("");
   const [isConnectingRemote, setIsConnectingRemote] = useState(false);
+  // True for the whole duration of any send (local or remote)
+  const [isTransferActive, setIsTransferActive] = useState(false);
   const [sendSuccess, setSendSuccess] = useState(false);
   const [speedText, setSpeedText] = useState<string | null>(null);
   const [etaText, setEtaText] = useState<string | null>(null);
@@ -52,6 +55,8 @@ const SendPage: React.FC = () => {
   const autoResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const transferStartRef = useRef<number | null>(null);
   const terminalEventRef = useRef(false);
+  const activeSessionRef = useRef(0);
+  const sessionFloorRef = useRef(0);
 
   const startDiscovery = async () => {
     setIsDiscovering(true);
@@ -72,10 +77,13 @@ const SendPage: React.FC = () => {
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
 
     const setupListener = async () => {
-      unlisten = await listen<PlenumEvent>("plenum-event", (event) => {
-        const payload = event.payload;
+      unlisten = await listen<PlenumEventEnvelope>("plenum-event", (event) => {
+        const { session_id, event: payload } = event.payload;
+        // Drop events from a superseded transfer so they can't mutate this one.
+        if (isStaleSession(session_id, activeSessionRef, sessionFloorRef)) return;
         if ("Discovery" in payload) {
            const disc = payload.Discovery;
            if (typeof disc === "object" && "PeerFound" in disc) {
@@ -197,17 +205,22 @@ const SendPage: React.FC = () => {
 
     let cleanupFn: (() => void) | undefined;
     setupListener().then(cleanup => {
-      cleanupFn = cleanup;
+      // Unmounted before listen() resolved — cleanup below already ran with
+      // cleanupFn still undefined, so tear the fresh listeners down now.
+      if (cancelled) cleanup();
+      else cleanupFn = cleanup;
     });
     startDiscovery();
 
     return () => {
+      cancelled = true;
       if (cleanupFn) cleanupFn();
       if (autoResetRef.current) clearTimeout(autoResetRef.current);
     };
   }, []);
 
   const handlePeerClick = (peer: DiscoverySummary) => {
+    if (isTransferActive) return;
     if (!selectedPath) {
       setTransferStatus("Please select a file or folder first");
       return;
@@ -218,7 +231,13 @@ const SendPage: React.FC = () => {
 
   const handlePinSubmit = async () => {
     if (!pinInputPeer) return;
-    
+    if (isTransferActive) return;
+
+    if (pinInputPeer.pin_required && pinInput.trim() === "") {
+      setTransferStatus("Please enter the pairing code shown on the receiver's screen.");
+      return;
+    }
+
     if (!pinInputPeer.pin_required && pinInput.trim() !== "") {
       if (pinInput.trim().toUpperCase() !== pinInputPeer.token.toUpperCase()) {
         setTransferStatus("Error: Incorrect PIN entered.");
@@ -228,9 +247,10 @@ const SendPage: React.FC = () => {
 
     setTransferStatus("Connecting to device...");
     terminalEventRef.current = false;
+    setIsTransferActive(true);
     const peer = pinInputPeer;
     setPinInputPeer(null);
-    
+
     try {
       const req: SendRequest = {
         file_path: selectedPath!,
@@ -246,6 +266,8 @@ const SendPage: React.FC = () => {
       console.error("Send error:", err);
       if (!terminalEventRef.current) setTransferStatus("Error: " + err);
       setProgress(null);
+    } finally {
+      setIsTransferActive(false);
     }
   };
 
@@ -254,14 +276,21 @@ const SendPage: React.FC = () => {
       setTransferStatus("Please select a file or folder first");
       return;
     }
-    if (roomCodeInput.trim() === "") {
+    const roomCode = roomCodeInput.trim().toUpperCase();
+    if (roomCode === "") {
       setTransferStatus("Please enter a room code");
       return;
     }
+    if (!/^[A-Z0-9]{9}$/.test(roomCode)) {
+      setTransferStatus("Room codes are 9 letters or numbers");
+      return;
+    }
+    if (isConnectingRemote || isTransferActive) return;
 
     setTransferStatus("Connecting to relay...");
     terminalEventRef.current = false;
     setIsConnectingRemote(true);
+    setIsTransferActive(true);
 
     try {
       const myPeerId = await invoke<string>("generate_peer_id_command");
@@ -271,10 +300,14 @@ const SendPage: React.FC = () => {
         peerId: myPeerId,
       });
       if (turn) iceServers.push(turn);
+      const roomResponse = await fetch(`${RELAY_SERVER_URL.replace(/\/$/, "")}/room/${encodeURIComponent(roomCode)}`);
+      if (!roomResponse.ok) {
+        throw new Error("Room not found. Ask the receiver to open Internet mode and share a new room code.");
+      }
       const req: SendRemoteRequest = {
         file_path: selectedPath!,
         relay_server_url: RELAY_SERVER_URL,
-        session_id: roomCodeInput.trim().toUpperCase(),
+        session_id: roomCode,
         my_peer_id: myPeerId,
         ice_servers: iceServers,
         connect_timeout_secs: 30,
@@ -290,7 +323,33 @@ const SendPage: React.FC = () => {
       setProgress(null);
     } finally {
       setIsConnectingRemote(false);
+      setIsTransferActive(false);
     }
+  };
+
+  const handleModeChange = async (nextMode: "local" | "internet") => {
+    if (nextMode === mode) return;
+    // Cancel any in-flight send in the Rust backend before swapping modes.
+    if (isTransferActive || isConnectingRemote) {
+      terminalEventRef.current = true;
+      try {
+        await invoke("cancel_session_command");
+      } catch (err) {
+        console.error("Cancel on mode switch failed:", err);
+      }
+    }
+    abandonSession(activeSessionRef, sessionFloorRef);
+    if (autoResetRef.current) clearTimeout(autoResetRef.current);
+    setIsTransferActive(false);
+    setIsConnectingRemote(false);
+    setPinInputPeer(null);
+    setProgress(null);
+    setSpeedText(null);
+    setEtaText(null);
+    setSendSuccess(false);
+    setTransferStatus("");
+    transferStartRef.current = null;
+    setMode(nextMode);
   };
 
   const handleSelectFile = async () => {
@@ -323,11 +382,11 @@ const SendPage: React.FC = () => {
       <div className="card-section">
         <h2 className="section-title">Mode</h2>
         <div className="card-grid">
-          <div className="action-card" onClick={() => setMode("local")} style={{ borderColor: mode === "local" ? "var(--accent-primary)" : "var(--border-color)" }}>
+          <div className="action-card" onClick={() => handleModeChange("local")} style={{ borderColor: mode === "local" ? "var(--accent-primary)" : "var(--border-color)" }}>
             <Wifi size={28} />
             <span>Local Network</span>
           </div>
-          <div className="action-card" onClick={() => setMode("internet")} style={{ borderColor: mode === "internet" ? "var(--accent-primary)" : "var(--border-color)" }}>
+          <div className="action-card" onClick={() => handleModeChange("internet")} style={{ borderColor: mode === "internet" ? "var(--accent-primary)" : "var(--border-color)" }}>
             <Globe size={28} />
             <span>Internet</span>
           </div>
@@ -423,19 +482,21 @@ const SendPage: React.FC = () => {
 
         {peers.map((peer, i) => (
           <div key={i} style={{ marginTop: "16px" }}>
-            <div onClick={() => handlePeerClick(peer)} style={{ 
-              backgroundColor: "var(--bg-card)", 
-              padding: "24px", 
-              borderRadius: pinInputPeer?.address === peer.address ? "12px 12px 0 0" : "12px", 
-              display: "flex", 
-              alignItems: "center", 
+            <div onClick={() => handlePeerClick(peer)} style={{
+              backgroundColor: "var(--bg-card)",
+              padding: "24px",
+              borderRadius: pinInputPeer?.address === peer.address ? "12px 12px 0 0" : "12px",
+              display: "flex",
+              alignItems: "center",
               gap: "16px",
-              cursor: "pointer",
+              cursor: isTransferActive ? "not-allowed" : "pointer",
+              opacity: isTransferActive ? 0.5 : 1,
+              pointerEvents: isTransferActive ? "none" : "auto",
               border: "1px solid transparent",
               borderBottom: pinInputPeer?.address === peer.address ? "1px solid var(--border-color)" : "1px solid transparent",
               transition: "all 0.2s ease"
             }}
-            onMouseEnter={(e) => e.currentTarget.style.borderColor = "var(--accent-primary)"}
+            onMouseEnter={(e) => { if (!isTransferActive) e.currentTarget.style.borderColor = "var(--accent-primary)"; }}
             onMouseLeave={(e) => { if (pinInputPeer?.address !== peer.address) e.currentTarget.style.borderColor = "transparent"; }}
             >
               <Monitor size={40} color="var(--accent-primary)" />

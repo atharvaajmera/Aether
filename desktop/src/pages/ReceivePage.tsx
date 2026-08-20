@@ -4,24 +4,17 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { downloadDir } from "@tauri-apps/api/path";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Copy, Check, Wifi, Globe, FolderOpen, CheckCircle2 } from "lucide-react";
-import { PlenumEvent, TransferEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary, IceServer } from "../types/rust";
+import { PlenumEventEnvelope, TransferEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary, IceServer } from "../types/rust";
 import { useSettings } from "../context/SettingsContext";
 import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration } from "../utils/format";
+import { isStaleSession, abandonSession } from "../utils/session";
 import TransferAcceptDialog, { IncomingTransfer } from "../components/TransferAcceptDialog";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
 type LogEvent = { level: string; message: string };
 
-const logToConsole = (log: LogEvent) => {
-  if (log.level === "Error") {
-    console.error(log.message);
-  } else if (log.level === "Warn") {
-    console.warn(log.message);
-  } else {
-    console.info(log.message);
-  }
-};
+const logToConsole = (_log: LogEvent) => undefined;
 
 const STATE_LABELS: Record<string, string> = {
   Discovering: "Searching...",
@@ -54,8 +47,9 @@ const ReceivePage: React.FC = () => {
   const [transferFailed, setTransferFailed] = useState(false);
   const transferStartRef = useRef<number | null>(null);
   const terminalEventRef = useRef(false);
+  const activeSessionRef = useRef(0);
+  const sessionFloorRef = useRef(0);
   const { settings } = useSettings();
-  // The listen callback closes over the first render's outputDir otherwise.
   const outputDirRef = useRef<string>("");
 
   const handleCopyPin = () => {
@@ -76,13 +70,13 @@ const ReceivePage: React.FC = () => {
 
   const handleAcceptResponse = (accept: boolean) => {
     setIncoming(null);
-    invoke("respond_to_incoming_command", { accept }).catch(console.error);
+    invoke("respond_to_incoming_command", { accept }).catch(() => setStatus("Could not respond to the transfer request. Please try again."));
     if (!accept) setStatus("Transfer declined");
   };
 
   const handleOpenFolder = () => {
     if (savedPath) {
-      revealItemInDir(savedPath).catch(console.error);
+      revealItemInDir(savedPath).catch(() => setStatus("Could not open the download folder."));
     }
   };
 
@@ -92,7 +86,7 @@ const ReceivePage: React.FC = () => {
     try {
       await invoke("cancel_session_command");
     } catch (err) {
-      console.error("Could not cancel the previous receiver:", err);
+      setStatus("Could not switch modes cleanly. Please try again.");
     }
     setMode(nextMode);
   };
@@ -232,12 +226,13 @@ const ReceivePage: React.FC = () => {
 
     const setupReceiver = async () => {
       // 1. Listen for events
-      unlisten = await listen<PlenumEvent>("plenum-event", (event) => {
-        const payload = event.payload;
+      const fn = await listen<PlenumEventEnvelope>("plenum-event", (event) => {
+        const { session_id, event: payload } = event.payload;
+        // Drop events from a superseded session so they can't mutate this one.
+        if (isStaleSession(session_id, activeSessionRef, sessionFloorRef)) return;
         if ("Discovery" in payload) {
            const disc = payload.Discovery;
            if (typeof disc === "object" && "BroadcastStarted" in disc) {
-             console.log("Broadcast started on port:", disc.BroadcastStarted.port);
              setPort(disc.BroadcastStarted.port);
              if (settingsRef.current.receive.requirePin) {
                setPin(disc.BroadcastStarted.token);
@@ -249,6 +244,9 @@ const ReceivePage: React.FC = () => {
            handleLogEventRef.current(payload.Log);
          }
       });
+      // Unmounted before listen() resolved — drop the listener immediately.
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
 
       // 2. Resolve the real system Downloads directory
       const downloadsPath = await downloadDir();
@@ -270,11 +268,10 @@ const ReceivePage: React.FC = () => {
         terminalEventRef.current = false;
         try {
           const result = await invoke<TransferSummary>("receive_file_command", { request: req });
-          console.log("Receive completed:", result);
+          void result;
           if (!cancelled) await new Promise(resolve => setTimeout(resolve, 1500));
         } catch (err) {
-          console.error("Receive error:", err);
-          if (!cancelled && !terminalEventRef.current) setStatus("Error: " + err);
+          if (!cancelled && !terminalEventRef.current) setStatus(`Could not receive the file: ${err instanceof Error ? err.message : String(err)}`);
           break;
         }
       }
@@ -284,6 +281,8 @@ const ReceivePage: React.FC = () => {
 
     return () => {
       cancelled = true;
+      // Abandon this session so a trailing event with same id can't hit the next mode.
+      abandonSession(activeSessionRef, sessionFloorRef);
       if (unlisten) unlisten();
     };
   }, [mode]);
@@ -297,14 +296,19 @@ const ReceivePage: React.FC = () => {
     let unlisten: UnlistenFn | undefined;
 
     const setupRemoteReceiver = async () => {
-      unlisten = await listen<PlenumEvent>("plenum-event", (event) => {
-        const payload = event.payload;
+      const fn = await listen<PlenumEventEnvelope>("plenum-event", (event) => {
+        const { session_id, event: payload } = event.payload;
+        // Drop events from a superseded session so they can't mutate this one.
+        if (isStaleSession(session_id, activeSessionRef, sessionFloorRef)) return;
         if ("Transfer" in payload) {
           handleTransferEventRef.current(payload.Transfer);
         } else if ("Log" in payload) {
           handleLogEventRef.current(payload.Log);
         }
       });
+      // Unmounted before listen() resolved — drop the listener immediately.
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
 
       const [code, myPeerId] = await Promise.all([
         invoke<string>("generate_room_code_command"),
@@ -341,10 +345,9 @@ const ReceivePage: React.FC = () => {
 
       try {
         const result = await invoke<TransferSummary>("receive_file_remote_command", { request: req });
-        console.log("Receive completed:", result);
+        void result;
       } catch (err) {
-        console.error("Receive error:", err);
-        if (!cancelled && !terminalEventRef.current) setStatus("Error: " + err);
+        if (!cancelled && !terminalEventRef.current) setStatus(`Could not connect: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
 
@@ -352,6 +355,8 @@ const ReceivePage: React.FC = () => {
 
     return () => {
       cancelled = true;
+      // Abandon this session so a trailing event with same id can't hit the next mode.
+      abandonSession(activeSessionRef, sessionFloorRef);
       if (unlisten) unlisten();
     };
   }, [mode]);

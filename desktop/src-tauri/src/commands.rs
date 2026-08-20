@@ -21,6 +21,15 @@ fn unix_millis() -> u128 {
         .as_millis()
 }
 
+/// Emits a plenum-event stamped with the producing session's id so the
+/// frontend can drop late events from a transfer 
+fn emit_event(app: &AppHandle, session_id: u64, event: PlenumEvent) {
+    let _ = app.emit(
+        "plenum-event",
+        json!({ "session_id": session_id, "event": event }),
+    );
+}
+
 fn create_transfer_log(app: &AppHandle, role: &str) -> Option<(PathBuf, BufWriter<File>)> {
     let directory = app.path().app_log_dir().ok()?;
     fs::create_dir_all(&directory).ok()?;
@@ -93,7 +102,7 @@ pub async fn send_file_command(
         let mut core = PlenumCore::new();
         let session_id = register_session(core.control());
         let mut sink = |event: PlenumEvent| {
-            let _ = app.emit("plenum-event", event);
+            emit_event(&app, session_id, event);
         };
         let result = core
             .send_file(request, &mut sink)
@@ -136,7 +145,7 @@ pub async fn receive_file_command(
                     "event": &event,
                 }),
             );
-            let _ = app.emit("plenum-event", event);
+            emit_event(&app, session_id, event);
         };
         let result = core
             .receive_file(request, &mut sink)
@@ -168,7 +177,7 @@ pub async fn discover_peers_command(
     tauri::async_runtime::spawn_blocking(move || {
         let mut core = PlenumCore::new();
         let mut sink = |event: PlenumEvent| {
-            let _ = app.emit("plenum-event", event);
+            emit_event(&app, 0, event);
         };
         core.discover_peer(request, &mut sink)
             .map_err(|e| e.to_string())
@@ -189,7 +198,7 @@ pub async fn send_file_remote_command(
         let mut core = PlenumCore::new();
         let session_id = register_session(core.control());
         let mut sink = |event: PlenumEvent| {
-            let _ = app.emit("plenum-event", event);
+            emit_event(&app, session_id, event);
         };
         let result = core
             .send_file_remote(request, &mut sink)
@@ -213,7 +222,7 @@ pub async fn receive_file_remote_command(
         let mut core = PlenumCore::new();
         let session_id = register_session(core.control());
         let mut sink = |event: PlenumEvent| {
-            let _ = app.emit("plenum-event", event);
+            emit_event(&app, session_id, event);
         };
         let result = core
             .receive_file_remote(request, &mut sink)
