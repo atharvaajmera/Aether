@@ -109,6 +109,37 @@ class InternetSettings {
     );
   }
 
+  // Get the room code from the HTTPS endpoint from a `wss://.../ws`
+  // relay signaling URL.
+  static Uri? _roomUri(String relayServerUrl, String roomCode) {
+    final trimmed = relayServerUrl.trim();
+    if (trimmed.isEmpty) return null;
+    Uri parsed;
+    try {
+      parsed = Uri.parse(trimmed);
+    } catch (_) {
+      return null;
+    }
+    final httpsScheme = switch (parsed.scheme) {
+      'wss' || 'https' => 'https',
+      'ws' || 'http' => 'http',
+      _ => 'https',
+    };
+    return parsed.replace(
+      scheme: httpsScheme,
+      path: '/room/$roomCode',
+    );
+  }
+
+  // Returns whether the relay currently has an open room for [roomCode].
+  // Hits the relay's `GET /room/{code}` endpoint (204 = exists, 404 = gone).
+  static Future<bool> roomExists(String relayServerUrl, String roomCode) async {
+    final uri = _roomUri(relayServerUrl, roomCode);
+    if (uri == null) return false;
+    final resp = await http.get(uri).timeout(const Duration(seconds: 8));
+    return resp.statusCode >= 200 && resp.statusCode < 300;
+  }
+
   /// Builds the full `ice_servers_json` FFI payload for a transfer: the
   /// user-configured STUN/TURN servers plus freshly minted, short-lived TURN
   /// credentials fetched from the relay's `/turn-credentials` endpoint.

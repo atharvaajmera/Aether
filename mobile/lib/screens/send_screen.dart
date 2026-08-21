@@ -42,6 +42,7 @@ class _SendScreenState extends State<SendScreen> {
   bool _isConnectingRemote = false;
   String? _sessionToken;
   StreamSubscription<String>? _transferSub;
+  StreamSubscription<String>? _discoverySub;
   bool _transferActive = false;
   bool _showSuccess = false;
   Timer? _autoResetTimer;
@@ -66,6 +67,7 @@ class _SendScreenState extends State<SendScreen> {
       } catch (_) {}
     }
     if (!_transferActive) _transferSub?.cancel();
+    _discoverySub?.cancel();
     _autoResetTimer?.cancel();
     _roomCodeController.dispose();
     if (!_transferActive) TransferLock.release();
@@ -102,6 +104,9 @@ class _SendScreenState extends State<SendScreen> {
   }
 
   void _startDiscovery() async {
+    _discoverySub?.cancel();
+    _discoverySub = null;
+
     await Permission.nearbyWifiDevices.request();
     if (!mounted) return;
 
@@ -111,7 +116,7 @@ class _SendScreenState extends State<SendScreen> {
       _progress = null;
     });
 
-    startDiscovery(timeoutSecs: BigInt.from(10)).listen((eventJson) {
+    _discoverySub = startDiscovery(timeoutSecs: BigInt.from(10)).listen((eventJson) {
       if (!mounted) return;
       final event = jsonDecode(eventJson);
       if (event['Discovery'] != null) {
@@ -347,11 +352,16 @@ class _SendScreenState extends State<SendScreen> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a file first')));
       return;
     }
-    final roomCode = _roomCodeController.text.trim();
+    final roomCode = _roomCodeController.text.trim().toUpperCase();
     if (roomCode.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please enter a room code')));
       return;
     }
+    if (!RegExp(r'^[A-Z0-9]{9}$').hasMatch(roomCode)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Room codes are 9 letters or numbers')));
+      return;
+    }
+    if (_isConnectingRemote) return;
 
     final settings = context.read<SettingsService>();
     final relayServerUrl = settings.relayServerUrl;
@@ -369,6 +379,17 @@ class _SendScreenState extends State<SendScreen> {
     });
 
     try {
+      final exists = await InternetSettings.roomExists(relayServerUrl, roomCode);
+      if (!exists) {
+        if (mounted) {
+          setState(() {
+            _transferStatus = 'Room not found. Ask the receiver to open Internet mode and share a new room code.';
+            _isConnectingRemote = false;
+          });
+        }
+        return;
+      }
+
       final myPeerId = generatePeerIdSync();
       final iceServersJson = await InternetSettings.buildIceServersJsonWithTurn(
         relayServerUrl,
@@ -386,7 +407,7 @@ class _SendScreenState extends State<SendScreen> {
       _transferSub = startSendRemote(
         filePath: _selectedFile!,
         relayServerUrl: relayServerUrl,
-        sessionId: roomCode.toUpperCase(),
+        sessionId: roomCode,
         myPeerId: myPeerId,
         iceServersJson: iceServersJson,
         connectTimeoutSecs: BigInt.from(30),

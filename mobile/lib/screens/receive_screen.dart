@@ -537,6 +537,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   }
 
   void _switchMode(TransferMode mode) {
+    if (mode == _mode) return;
+    _stopReceiving();
     setState(() {
       _mode = mode;
       _statusMessage = mode == TransferMode.local
@@ -544,7 +546,6 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
           : 'Preparing...';
     });
     if (mode == TransferMode.internet) {
-      _remoteStarted = false;
       _setupRemoteReceiver();
     }
   }
