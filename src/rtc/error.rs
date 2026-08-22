@@ -8,6 +8,7 @@ pub enum RtcError {
     PeerConnection(String),
     Timeout,
     PeerNeverArrived,
+    PeerLeft,
     /// The connection attempt was cancelled locally before it completed.
     Cancelled,
     WebSocket(String),
@@ -20,6 +21,7 @@ impl fmt::Display for RtcError {
             Self::PeerConnection(message) => write!(f, "rtc peer connection error: {message}"),
             Self::Timeout => write!(f, "rtc connection attempt timed out"),
             Self::PeerNeverArrived => write!(f, "rtc connection timed out waiting for remote peer"),
+            Self::PeerLeft => write!(f, "the other device disconnected before the transfer started"),
             Self::Cancelled => write!(f, "rtc connection attempt cancelled"),
             Self::WebSocket(message) => write!(f, "rtc websocket error: {message}"),
         }

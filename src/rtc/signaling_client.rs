@@ -593,6 +593,9 @@ pub async fn run_offerer(
                             pending_remote_candidates.push(init);
                         }
                     }
+                    SignalMessage::PeerLeft { .. } => {
+                        return Err(RtcError::PeerLeft);
+                    }
                     SignalMessage::Error { message } => {
                         return Err(RtcError::Signaling(message));
                     }
@@ -797,6 +800,14 @@ pub async fn run_answerer(
                         } else {
                             pending_remote_candidates.push(init);
                         }
+                    }
+                    SignalMessage::PeerLeft { .. } => {
+                        // The remote left the room before the channel opened
+                        // (closed app, switched modes, backgrounded, or the relay
+                        // dropped it). Fail now instead of waiting out the connect
+                        // timeout. In a two-peer room PeerLeft always means the
+                        // counterpart, so this is unambiguous.
+                        return Err(RtcError::PeerLeft);
                     }
                     SignalMessage::Error { message } => {
                         return Err(RtcError::Signaling(message));
