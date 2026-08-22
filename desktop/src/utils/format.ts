@@ -5,6 +5,13 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+export function progressPercent(transferred: number, total: number): number {
+  if (!Number.isFinite(transferred) || !Number.isFinite(total)) return 0;
+  if (total <= 0) return total === 0 && transferred >= 0 ? 100 : 0;
+  const pct = (transferred / total) * 100;
+  return Math.min(100, Math.max(0, pct));
+}
+
 /** Humanizes a transfer duration: "12.4 s" under a minute, "1 m 05 s" above. */
 export function formatDuration(ms: number): string {
   const totalSeconds = ms / 1000;

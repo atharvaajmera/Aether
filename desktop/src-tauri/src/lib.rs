@@ -7,27 +7,20 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-fn get_device_name() -> String {
-    whoami::devicename().unwrap_or_else(|_| "Unknown Device".to_string())
+fn get_device_name() -> Option<String> {
+    whoami::devicename().ok()
 }
 
 #[tauri::command]
-fn get_username() -> String {
-    whoami::username().unwrap_or_else(|_| "User".to_string())
+fn get_username() -> Option<String> {
+    whoami::username().ok()
 }
 
 #[tauri::command]
-fn get_local_ip() -> String {
-    match std::net::UdpSocket::bind("0.0.0.0:0") {
-        Ok(socket) => match socket.connect("8.8.8.8:80") {
-            Ok(()) => socket
-                .local_addr()
-                .map(|addr| addr.ip().to_string())
-                .unwrap_or_else(|_| "127.0.0.1".to_string()),
-            Err(_) => "127.0.0.1".to_string(),
-        },
-        Err(_) => "127.0.0.1".to_string(),
-    }
+fn get_local_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    socket.local_addr().ok().map(|addr| addr.ip().to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

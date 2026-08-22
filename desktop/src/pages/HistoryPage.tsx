@@ -8,14 +8,23 @@ import { formatBytes, formatDuration, formatTransferMode } from "../utils/format
 const HistoryPage: React.FC = () => {
   // Read once on mount — no transfer can complete while the user sits here.
   const [entries, setEntries] = useState<HistoryEntry[]>(() => getHistory());
+  // Shown when revealing a file fails (moved, deleted, drive offline, denied).
+  const [revealError, setRevealError] = useState<string | null>(null);
 
   const handleClear = () => {
     clearHistory();
     setEntries([]);
+    setRevealError(null);
   };
 
-  const handleReveal = (path: string) => {
-    revealItemInDir(path).catch(console.error);
+  const handleReveal = async (path: string, fileName: string) => {
+    try {
+      await revealItemInDir(path);
+      setRevealError(null);
+    } catch (err) {
+      console.error("Reveal failed:", err);
+      setRevealError(`Couldn't open "${fileName}" — it may have been moved, deleted, or saved to a drive that isn't connected.`);
+    }
   };
 
   return (
@@ -32,6 +41,17 @@ const HistoryPage: React.FC = () => {
           </button>
         )}
       </div>
+
+      {revealError && (
+        <div
+          role="alert"
+          onClick={() => setRevealError(null)}
+          style={{ marginBottom: "16px", padding: "12px 16px", borderRadius: "8px", backgroundColor: "color-mix(in srgb, #e5484d 12%, transparent)", border: "1px solid color-mix(in srgb, #e5484d 40%, transparent)", color: "var(--text-primary)", fontSize: "13px", cursor: "pointer" }}
+          title="Dismiss"
+        >
+          {revealError}
+        </div>
+      )}
 
       {entries.length === 0 ? (
         <div style={{ padding: "48px", textAlign: "center", color: "var(--text-secondary)" }}>
@@ -50,7 +70,7 @@ const HistoryPage: React.FC = () => {
                 key={i}
                 className="settings-row"
                 style={{ alignItems: "flex-start", gap: "12px", cursor: canReveal ? "pointer" : "default" }}
-                onClick={canReveal ? () => handleReveal(e.path!) : undefined}
+                onClick={canReveal ? () => handleReveal(e.path!, e.fileName) : undefined}
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "36px", height: "36px", borderRadius: "50%", backgroundColor: "var(--bg-sidebar)", flexShrink: 0 }}>
                   {isSend

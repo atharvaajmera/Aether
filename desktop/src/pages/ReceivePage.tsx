@@ -7,7 +7,7 @@ import { Copy, Check, Wifi, Globe, FolderOpen, CheckCircle2 } from "lucide-react
 import { PlenumEventEnvelope, TransferEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary, IceServer } from "../types/rust";
 import { useSettings } from "../context/SettingsContext";
 import { addHistoryEntry } from "../services/history";
-import { formatBytes, formatDuration } from "../utils/format";
+import { formatBytes, formatDuration, progressPercent } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
 import TransferAcceptDialog, { IncomingTransfer } from "../components/TransferAcceptDialog";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
@@ -29,9 +29,9 @@ const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Connect
 
 const ReceivePage: React.FC = () => {
   const [mode, setMode] = useState<"local" | "internet">("local");
-  const [deviceName, setDeviceName] = useState<string>("Loading...");
-  const [localIp, setLocalIp] = useState<string>("");
-  const [username, setUsername] = useState<string>("");
+  const [deviceName, setDeviceName] = useState<string | null>("Loading...");
+  const [localIp, setLocalIp] = useState<string | null>(null);
+  const [username, setUsername] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("Ready to receive files...");
   const [progress, setProgress] = useState<{ transferred: number, total: number } | null>(null);
   const [pin, setPin] = useState<string | null>(null);
@@ -39,6 +39,8 @@ const ReceivePage: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [roomCodeCopied, setRoomCodeCopied] = useState(false);
+  // Set when a clipboard write is denied so the UI can prompt manual copy.
+  const [copyError, setCopyError] = useState<string | null>(null);
   const [incoming, setIncoming] = useState<IncomingTransfer | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [speedText, setSpeedText] = useState<string | null>(null);
@@ -52,19 +54,30 @@ const ReceivePage: React.FC = () => {
   const { settings } = useSettings();
   const outputDirRef = useRef<string>("");
 
-  const handleCopyPin = () => {
-    if (pin) {
-      navigator.clipboard.writeText(pin);
+  const handleCopyPin = async () => {
+    if (!pin) return;
+    try {
+      await navigator.clipboard.writeText(pin);
+      setCopyError(null);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      // Clipboard access can be denied; don't show a false "copied" state.
+      console.error("Clipboard write failed:", err);
+      setCopyError("Couldn't copy to clipboard — select and copy the code manually.");
     }
   };
 
-  const handleCopyRoomCode = () => {
-    if (roomCode) {
-      navigator.clipboard.writeText(roomCode);
+  const handleCopyRoomCode = async () => {
+    if (!roomCode) return;
+    try {
+      await navigator.clipboard.writeText(roomCode);
+      setCopyError(null);
       setRoomCodeCopied(true);
       setTimeout(() => setRoomCodeCopied(false), 2000);
+    } catch (err) {
+      console.error("Clipboard write failed:", err);
+      setCopyError("Couldn't copy to clipboard — select and copy the code manually.");
     }
   };
 
@@ -111,6 +124,11 @@ const ReceivePage: React.FC = () => {
           senderName: req.sender_name,
         });
         setStatus("Incoming file — waiting for your decision");
+      } else {
+        // Auto-accept skips the dialog. Surface the file/sender explicitly so the
+        // user has confirmation of what was accepted even if negotiation stalls.
+        const sender = req.sender_name ?? req.peer ?? "device";
+        setStatus(`Accepting ${req.file_name} (${formatBytes(req.total_bytes)}) from ${sender}...`);
       }
     } else if ("ConnectionEstablished" in trans) {
       const connection = trans.ConnectionEstablished.mode === "Relay" ? "relay" : trans.ConnectionEstablished.mode === "Direct" ? "direct connection" : "local network";
@@ -213,9 +231,9 @@ const ReceivePage: React.FC = () => {
   handleLogEventRef.current = handleLogEvent;
 
   useEffect(() => {
-    invoke<string>("get_device_name").then(setDeviceName).catch(console.error);
-    invoke<string>("get_local_ip").then(setLocalIp).catch(console.error);
-    invoke<string>("get_username").then(setUsername).catch(console.error);
+    invoke<string | null>("get_device_name").then(setDeviceName).catch(() => setDeviceName(null));
+    invoke<string | null>("get_local_ip").then(setLocalIp).catch(() => setLocalIp(null));
+    invoke<string | null>("get_username").then(setUsername).catch(() => setUsername(null));
   }, []);
 
   useEffect(() => {
@@ -388,15 +406,22 @@ const ReceivePage: React.FC = () => {
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginTop: "20px" }}>
         {mode === "local" && (
           <>
-            <h1 className="device-name" style={{ textAlign: "center" }}>{settings.deviceName || deviceName}</h1>
+            <h1 className="device-name" style={{ textAlign: "center" }}>
+              {settings.deviceName || deviceName || <span style={{ fontStyle: "italic", opacity: 0.6 }}>Unknown device</span>}
+            </h1>
             <div className="device-id" style={{ textAlign: "center", userSelect: "text" }}>
-              {localIp}{port ? `:${port}` : ''} {username ? `• ${username}` : ''}
+              {localIp
+                ? <>{localIp}{port ? `:${port}` : ''}</>
+                : <span style={{ fontStyle: "italic", opacity: 0.6 }}>Network address unavailable</span>}
+              {username ? ` • ${username}` : ''}
             </div>
           </>
         )}
 
         {mode === "internet" && (
-          <h1 className="device-name" style={{ textAlign: "center" }}>{settings.deviceName || deviceName}</h1>
+          <h1 className="device-name" style={{ textAlign: "center" }}>
+            {settings.deviceName || deviceName || <span style={{ fontStyle: "italic", opacity: 0.6 }}>Unknown device</span>}
+          </h1>
         )}
 
         <div style={{ marginTop: "20px", fontSize: "14px", color: "var(--text-secondary)", textAlign: "center" }}>
@@ -434,14 +459,20 @@ const ReceivePage: React.FC = () => {
           </div>
         )}
 
+        {copyError && (
+          <div style={{ marginTop: "12px", fontSize: "12px", color: "#e5484d", textAlign: "center", maxWidth: "300px" }}>
+            {copyError}
+          </div>
+        )}
+
         {progress && (
           <div style={{ marginTop: "16px", width: "80%", maxWidth: "300px" }}>
             <div style={{ width: "100%", backgroundColor: "var(--bg-sidebar)", height: "8px", borderRadius: "4px", overflow: "hidden" }}>
-              <div style={{ width: `${(progress.transferred / progress.total) * 100}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
+              <div style={{ width: `${progressPercent(progress.transferred, progress.total)}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
             </div>
             <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "8px", textAlign: "center" }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>{Math.round((progress.transferred / progress.total) * 100)}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+                <span>{Math.round(progressPercent(progress.transferred, progress.total))}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
                 {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
               </div>
             </div>

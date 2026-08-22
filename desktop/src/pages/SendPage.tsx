@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { PlenumEventEnvelope, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, TransferEvent, IceServer } from "../types/rust";
 import { addHistoryEntry } from "../services/history";
-import { formatBytes, formatDuration } from "../utils/format";
+import { formatBytes, formatDuration, progressPercent } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
 import { useSettings } from "../context/SettingsContext";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
@@ -57,11 +57,20 @@ const SendPage: React.FC = () => {
   const terminalEventRef = useRef(false);
   const activeSessionRef = useRef(0);
   const sessionFloorRef = useRef(0);
+  // Discovery is a local-mode-only activity. The listener closes over the first
+  // render, so it reads current mode through this ref instead of `mode`.
+  const modeRef = useRef(mode);
+  // Bumped whenever an in-flight discovery is superseded (new search) or
+  // invalidated (mode switch / unmount) so its late completion can't flip state.
+  const discoveryGenRef = useRef(0);
 
   const startDiscovery = async () => {
+    // Only local mode discovers; ignore stray calls from other modes.
+    if (modeRef.current !== "local") return;
+    const gen = ++discoveryGenRef.current;
     setIsDiscovering(true);
     setPeers([]);
-    
+
     try {
       const req: DiscoverRequest = {
         timeout_secs: 10,
@@ -71,9 +80,27 @@ const SendPage: React.FC = () => {
     } catch (err) {
       console.error("Discovery error:", err);
     } finally {
-      setIsDiscovering(false);
+      // Skip if this run was superseded/invalidated (mode switch, new search).
+      if (discoveryGenRef.current === gen) setIsDiscovering(false);
     }
   };
+
+  // Keep modeRef current for the long-lived event listener. Declared before the
+  // discovery effect so modeRef is updated before that effect reads it.
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+
+  // Discovery is scoped to local mode: start it on entering local, invalidate it
+  // on leaving (or unmount) so a late PeerFound/completion can't reach the next
+  // mode and stale peers don't linger. Runs on mount because mode starts local.
+  useEffect(() => {
+    if (mode !== "local") return;
+    startDiscovery();
+    return () => {
+      discoveryGenRef.current++;
+      setIsDiscovering(false);
+      setPeers([]);
+    };
+  }, [mode]);
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -85,6 +112,10 @@ const SendPage: React.FC = () => {
         // Drop events from a superseded transfer so they can't mutate this one.
         if (isStaleSession(session_id, activeSessionRef, sessionFloorRef)) return;
         if ("Discovery" in payload) {
+           // Discovery events carry session_id 0 (they bypass the transfer gate),
+           // so gate them on mode: a search from before a mode switch must not
+           // repopulate peers while the user is in Internet mode.
+           if (modeRef.current !== "local") return;
            const disc = payload.Discovery;
            if (typeof disc === "object" && "PeerFound" in disc) {
              setPeers((prev) => {
@@ -210,7 +241,6 @@ const SendPage: React.FC = () => {
       if (cancelled) cleanup();
       else cleanupFn = cleanup;
     });
-    startDiscovery();
 
     return () => {
       cancelled = true;
@@ -436,10 +466,10 @@ const SendPage: React.FC = () => {
               {progress && (
                 <div style={{ marginTop: "12px", width: "100%" }}>
                   <div style={{ width: "100%", backgroundColor: "var(--bg-sidebar)", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
-                    <div style={{ width: `${(progress.transferred / progress.total) * 100}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
+                    <div style={{ width: `${progressPercent(progress.transferred, progress.total)}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "12px", color: "var(--text-secondary)" }}>
-                    <span>{Math.round((progress.transferred / progress.total) * 100)}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+                    <span>{Math.round(progressPercent(progress.transferred, progress.total))}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
                     {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
                   </div>
                 </div>
@@ -539,10 +569,10 @@ const SendPage: React.FC = () => {
             {progress && (
               <div style={{ marginTop: "12px", width: "100%" }}>
                 <div style={{ width: "100%", backgroundColor: "var(--bg-sidebar)", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
-                  <div style={{ width: `${(progress.transferred / progress.total) * 100}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
+                  <div style={{ width: `${progressPercent(progress.transferred, progress.total)}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "12px", color: "var(--text-secondary)" }}>
-                  <span>{Math.round((progress.transferred / progress.total) * 100)}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+                  <span>{Math.round(progressPercent(progress.transferred, progress.total))}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
                   {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
                 </div>
               </div>

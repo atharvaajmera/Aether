@@ -7,22 +7,22 @@ import { useSettings } from "../context/SettingsContext";
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
   const { settings } = useSettings();
-  const [deviceName, setDeviceName] = useState<string>("Loading...");
-  const [localIp, setLocalIp] = useState<string>("");
-  const [username, setUsername] = useState<string>("");
+  const [deviceName, setDeviceName] = useState<string | null>("Loading...");
+  const [localIp, setLocalIp] = useState<string | null>(null);
+  const [username, setUsername] = useState<string | null>(null);
 
   useEffect(() => {
-    invoke<string>("get_device_name")
+    invoke<string | null>("get_device_name")
       .then((name) => setDeviceName(name))
-      .catch(console.error);
-      
-    invoke<string>("get_local_ip")
-      .then((ip) => setLocalIp(ip))
-      .catch(console.error);
+      .catch(() => setDeviceName(null));
 
-    invoke<string>("get_username")
+    invoke<string | null>("get_local_ip")
+      .then((ip) => setLocalIp(ip))
+      .catch(() => setLocalIp(null));
+
+    invoke<string | null>("get_username")
       .then((user) => setUsername(user))
-      .catch(console.error);
+      .catch(() => setUsername(null));
   }, []);
 
   return (
@@ -32,8 +32,11 @@ const HomePage: React.FC = () => {
         <div className="core-circle"></div>
       </div>
       
-      <h1 className="device-name">{settings.deviceName || deviceName}</h1>
-      <div className="device-id">{localIp} {username ? `• ${username}` : ''}</div>
+      <h1 className="device-name">{settings.deviceName || deviceName || <span style={{ fontStyle: "italic", opacity: 0.6 }}>Unknown device</span>}</h1>
+      <div className="device-id">
+        {localIp ?? <span style={{ fontStyle: "italic", opacity: 0.6 }}>Network address unavailable</span>}
+        {username ? ` • ${username}` : ''}
+      </div>
 
       <div className="nav-buttons-container">
         <div className="nav-buttons-row">

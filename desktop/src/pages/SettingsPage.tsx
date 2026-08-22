@@ -11,13 +11,13 @@ const SettingsPage: React.FC = () => {
   const themes = ["System", "Dark", "Light"];
   const colors = ["Plenum", "Ocean", "Forest"];
 
-  const [hostname, setHostname] = useState<string>("");
+  const [hostname, setHostname] = useState<string | null>("");
   const [renameOpen, setRenameOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    invoke<string>("get_device_name").then(setHostname).catch(console.error);
+    invoke<string | null>("get_device_name").then(setHostname).catch(() => setHostname(null));
   }, []);
 
   useEffect(() => {
@@ -42,7 +42,7 @@ const SettingsPage: React.FC = () => {
     </div>
   );
 
-  const displayName = settings.deviceName || hostname;
+  const displayName = settings.deviceName || hostname || "Unknown device";
 
   return (
     <div className="settings-container">
