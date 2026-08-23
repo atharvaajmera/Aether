@@ -168,7 +168,7 @@ class _SendScreenState extends State<SendScreen> {
       final level = log['level'];
       if (level == 'Warn' || level == 'Error') {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(log['message'] ?? 'Error occurred'),
+          content: Text(friendlyLogMessage(level, log['message'])),
           backgroundColor: level == 'Error' ? Colors.redAccent : Colors.orange,
         ));
       }
@@ -221,7 +221,7 @@ class _SendScreenState extends State<SendScreen> {
         });
       } else if (trans['Failed'] != null) {
         setState(() {
-          _transferStatus = trans['Failed']['message'] ?? 'Transfer failed';
+          _transferStatus = friendlyError(trans['Failed']['message']);
           _progress = null;
           _isConnectingRemote = false;
           _transferActive = false;
@@ -247,7 +247,8 @@ class _SendScreenState extends State<SendScreen> {
           _transferredBytes = trans['Progress']['transferred_bytes'];
           _totalBytes = trans['Progress']['total_bytes'];
           if (_totalBytes != null && _totalBytes! > 0) {
-            _progress = _transferredBytes! / _totalBytes!;
+            // Clamp: a duplicate/late Progress event can report more than total.
+            _progress = (_transferredBytes! / _totalBytes!).clamp(0.0, 1.0);
           }
 
           if (_transferStartTime != null && _transferredBytes != null && _totalBytes != null) {
@@ -316,7 +317,7 @@ class _SendScreenState extends State<SendScreen> {
     } catch (error) {
       if (mounted) {
         setState(() {
-          _transferStatus = 'Transfer lock unavailable: $error';
+          _transferStatus = 'Transfer lock unavailable';
           _transferActive = false;
         });
       }
@@ -338,7 +339,7 @@ class _SendScreenState extends State<SendScreen> {
         TransferLock.release();
         if (mounted) {
           setState(() {
-            _transferStatus = 'Error: $e';
+            _transferStatus = friendlyError(e);
             _progress = null;
             _transferActive = false;
           });
@@ -428,7 +429,7 @@ class _SendScreenState extends State<SendScreen> {
           TransferLock.release();
           if (mounted) {
             setState(() {
-              _transferStatus = 'Error: $e';
+              _transferStatus = friendlyError(e);
               _progress = null;
               _isConnectingRemote = false;
               _transferActive = false;
@@ -439,7 +440,7 @@ class _SendScreenState extends State<SendScreen> {
     } catch (e) {
       TransferLock.release();
       setState(() {
-        _transferStatus = 'Error: $e';
+        _transferStatus = friendlyError(e);
         _isConnectingRemote = false;
       });
     }

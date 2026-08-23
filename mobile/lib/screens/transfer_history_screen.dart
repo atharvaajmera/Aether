@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:open_filex/open_filex.dart';
@@ -65,7 +66,26 @@ class TransferHistoryScreen extends StatelessWidget {
                     ],
                   ),
                   isThreeLine: true,
-                  onTap: (!isSend && path != null) ? () => OpenFilex.open(path) : null,
+                  onTap: (!isSend && path != null)
+                      ? () async {
+                          if (!await File(path).exists()) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                                content: Text('This file was moved or deleted and can no longer be opened.'),
+                              ));
+                            }
+                            return;
+                          }
+                          final result = await OpenFilex.open(path);
+                          if (result.type != ResultType.done && context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                              content: Text(result.type == ResultType.noAppToOpen
+                                  ? 'No app is available to open this file type'
+                                  : 'Could not open the file'),
+                            ));
+                          }
+                        }
+                      : null,
                 );
               },
             ),

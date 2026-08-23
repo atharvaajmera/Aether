@@ -64,7 +64,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     final level = log['level'];
     if (level == 'Warn' || level == 'Error') {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(log['message'] ?? 'Error occurred'),
+        content: Text(friendlyLogMessage(level, log['message'])),
         backgroundColor: level == 'Error' ? Colors.redAccent : Colors.orange,
       ));
     }
@@ -213,7 +213,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }, onError: (e) {
       TransferLock.release();
       setState(() {
-        _statusMessage = 'Error: $e';
+        _statusMessage = friendlyError(e);
         _isListening = false;
       });
     });
@@ -232,12 +232,24 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       }
     } else if (transEvent['IncomingRequest'] != null) {
       final req = transEvent['IncomingRequest'];
-      _showIncomingRequestDialog(
-        fileName: req['file_name'] ?? 'Unknown file',
-        totalBytes: req['total_bytes'] ?? 0,
-        peer: req['peer'],
-        senderName: req['sender_name'],
-      );
+      final fileName = req['file_name'] ?? 'Unknown file';
+      final totalBytes = req['total_bytes'] ?? 0;
+      if (_autoAcceptActive) {
+        // Auto-accept skips the dialog. Surface the file/sender explicitly so the
+        // user has confirmation of what was accepted even if negotiation stalls
+        // on a slow network.
+        final sender = req['sender_name'] ?? req['peer'] ?? 'device';
+        setState(() {
+          _statusMessage = 'Accepting $fileName (${formatBytes(totalBytes)}) from $sender...';
+        });
+      } else {
+        _showIncomingRequestDialog(
+          fileName: fileName,
+          totalBytes: totalBytes,
+          peer: req['peer'],
+          senderName: req['sender_name'],
+        );
+      }
     } else if (transEvent['Cancelled'] != null) {
       TransferLock.release();
       setState(() {
@@ -264,7 +276,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       });
     } else if (transEvent['Failed'] != null) {
       setState(() {
-        _statusMessage = transEvent['Failed']['message'] ?? 'Transfer failed';
+        _statusMessage = friendlyError(transEvent['Failed']['message']);
         _progress = null;
         _speedText = null;
         _etaText = null;
@@ -281,7 +293,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         _transferredBytes = p['transferred_bytes'];
         _totalBytes = p['total_bytes'];
         if (_totalBytes != null && _totalBytes! > 0) {
-          _progress = _transferredBytes! / _totalBytes!;
+          // Clamp: a duplicate/late Progress event can report more than total.
+          _progress = (_transferredBytes! / _totalBytes!).clamp(0.0, 1.0);
         }
 
         if (_transferStartTime != null && _transferredBytes != null && _totalBytes != null) {
@@ -509,30 +522,101 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       TransferLock.release();
       if (mounted) {
         setState(() {
-          _statusMessage = 'Error: $e';
+          _statusMessage = friendlyError(e);
           _remoteStarted = false;
         });
       }
     });
   }
 
-  void _copyPin() {
-    if (_pin != null) {
-      Clipboard.setData(ClipboardData(text: _pin!));
+  Future<void> _copyPin() async {
+    if (_pin == null) return;
+    try {
+      await Clipboard.setData(ClipboardData(text: _pin!));
+      if (!mounted) return;
       setState(() => _copied = true);
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) setState(() => _copied = false);
       });
+    } catch (_) {
+      // handle clipboard access denied
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not copy — copy the code manually')),
+        );
+      }
     }
   }
 
-  void _copyRoomCode() {
-    if (_roomCode != null) {
-      Clipboard.setData(ClipboardData(text: _roomCode!));
+  Future<void> _copyRoomCode() async {
+    if (_roomCode == null) return;
+    try {
+      await Clipboard.setData(ClipboardData(text: _roomCode!));
+      if (!mounted) return;
       setState(() => _roomCodeCopied = true);
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) setState(() => _roomCodeCopied = false);
       });
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not copy — copy the code manually')),
+        );
+      }
+    }
+  }
+
+  void _showFileMissingSnack() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('This file was moved or deleted and can no longer be opened.'),
+    ));
+  }
+
+  String _openResultMessage(ResultType type) {
+    switch (type) {
+      case ResultType.noAppToOpen:
+        return 'No app is available to open this file type';
+      case ResultType.permissionDenied:
+        return 'Permission denied while opening the file';
+      case ResultType.fileNotFound:
+        return 'This file was moved or deleted';
+      default:
+        return 'Could not open the file';
+    }
+  }
+
+  Future<void> _openSavedFile() async {
+    final path = _savedFilePath;
+    if (path == null) return;
+    if (!await File(path).exists()) {
+      _showFileMissingSnack();
+      return;
+    }
+    final result = await OpenFilex.open(path);
+    if (result.type != ResultType.done && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_openResultMessage(result.type))),
+      );
+    }
+  }
+
+  Future<void> _shareSavedFile() async {
+    final path = _savedFilePath;
+    if (path == null) return;
+    if (!await File(path).exists()) {
+      _showFileMissingSnack();
+      return;
+    }
+    try {
+      // ignore: deprecated_member_use
+      await Share.shareXFiles([XFile(path)]);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not share the file')),
+        );
+      }
     }
   }
 
@@ -716,7 +800,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       icon: const Icon(Icons.stop_circle, color: AppTheme.accentPrimary, size: 18),
                       label: const Text('Stop Receiving', style: TextStyle(color: AppTheme.accentPrimary)),
                     ),
-                  if (_statusMessage.startsWith('Error:'))
+                  if (isTransferFailure(_statusMessage))
                     Padding(
                       padding: const EdgeInsets.only(top: 4),
                       child: ElevatedButton.icon(
@@ -856,15 +940,14 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                         children: [
                           Expanded(
                             child: ElevatedButton(
-                              onPressed: () => OpenFilex.open(_savedFilePath!),
+                              onPressed: _openSavedFile,
                               child: const Text('Open'),
                             ),
                           ),
                           const SizedBox(width: 8),
                           Expanded(
                             child: ElevatedButton(
-                              // ignore: deprecated_member_use
-                              onPressed: () => Share.shareXFiles([XFile(_savedFilePath!)]),
+                              onPressed: _shareSavedFile,
                               child: const Text('Share'),
                             ),
                           ),

@@ -94,7 +94,14 @@ class SettingsService extends ChangeNotifier {
 
   List<Map<String, dynamic>> get transferHistory {
     final list = _prefs.getStringList('transferHistory') ?? [];
-    return list.map((s) => jsonDecode(s) as Map<String, dynamic>).toList();
+    final result = <Map<String, dynamic>>[];
+    for (final s in list) {
+      try {
+        final decoded = jsonDecode(s);
+        if (decoded is Map<String, dynamic>) result.add(decoded);
+      } catch (_) {}
+    }
+    return result;
   }
   Future<void> addTransferHistory(Map<String, dynamic> entry) async {
     final list = _prefs.getStringList('transferHistory') ?? [];
