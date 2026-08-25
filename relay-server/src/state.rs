@@ -1,7 +1,7 @@
 //! Shared application state for the relay/signaling server.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use axum::extract::ws::Message;
 use plenum::signaling::SignalingState;
@@ -16,11 +16,8 @@ pub struct PeerHandle {
     pub sender: mpsc::UnboundedSender<Message>,
 }
 
-/// Process-wide state shared across all WebSocket connections and HTTP
-/// handlers.
-///
-/// A single mutex around `SignalingState` is sufficient at expected relay
-/// scale (signaling traffic only, not bulk data transfer).
+// Process-wide state shared across all WebSocket connections and HTTP
+// handlers.
 pub struct AppState {
     pub signaling: Mutex<SignalingState>,
     pub peers: Mutex<HashMap<String, PeerHandle>>,
@@ -38,10 +35,24 @@ impl AppState {
         }
     }
 
-    pub fn room_exists(&self, session_id: &str) -> bool {
+    // Locks the signaling state, recovering the guard if a previous lock
+    // holder panicked.
+    pub fn lock_signaling(&self) -> MutexGuard<'_, SignalingState> {
         self.signaling
             .lock()
-            .map(|signaling| signaling.peers_in_session(session_id).is_some())
-            .unwrap_or(false)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    // Locks the peer routing table, recovering the guard on poison.
+    pub fn lock_peers(&self) -> MutexGuard<'_, HashMap<String, PeerHandle>> {
+        self.peers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn room_exists(&self, session_id: &str) -> bool {
+        self.lock_signaling()
+            .peers_in_session(session_id)
+            .is_some()
     }
 }

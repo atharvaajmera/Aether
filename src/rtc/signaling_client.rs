@@ -34,6 +34,10 @@ const SIGNALING_LINGER: Duration = Duration::from_secs(15);
 
 const WS_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn lock_recover<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -304,7 +308,7 @@ fn wire_ice_candidate_outbound(
             let Some(candidate) = candidate else {
                 return;
             };
-            let Some(to_peer_id) = remote_peer_id.lock().unwrap().clone() else {
+            let Some(to_peer_id) = lock_recover(&remote_peer_id).clone() else {
                 return;
             };
             let Ok(init) = candidate.to_json() else {
@@ -527,7 +531,7 @@ pub async fn run_offerer(
 
                 match signal {
                     SignalMessage::PeerJoined { peer_id, .. } if !data_channel_created => {
-                        *remote_peer_id.lock().unwrap() = Some(peer_id.clone());
+                        *lock_recover(&remote_peer_id) = Some(peer_id.clone());
                         data_channel_created = true;
 
                         let dc_init = RTCDataChannelInit {
@@ -711,7 +715,7 @@ pub async fn run_answerer(
         if data_channel.ready_state() == RTCDataChannelState::Open {
             let _ = open_tx_for_channel.send(());
         }
-        *pending_data_channel_setter.lock().unwrap() = Some(data_channel);
+        *lock_recover(&pending_data_channel_setter) = Some(data_channel);
         Box::pin(async {})
     }));
 
@@ -729,9 +733,7 @@ pub async fn run_answerer(
                 break;
             }
             _ = open_poll.tick() => {
-                let ready = pending_data_channel
-                    .lock()
-                    .unwrap()
+                let ready = lock_recover(&pending_data_channel)
                     .as_ref()
                     .map(|data_channel| data_channel.ready_state());
                 if ready == Some(RTCDataChannelState::Open) {
@@ -751,7 +753,7 @@ pub async fn run_answerer(
 
                 match signal {
                     SignalMessage::Offer { from_peer_id, sdp, .. } if !answered => {
-                        *remote_peer_id.lock().unwrap() = Some(from_peer_id.clone());
+                        *lock_recover(&remote_peer_id) = Some(from_peer_id.clone());
                         answered = true;
 
                         let offer = RTCSessionDescription::offer(sdp)
@@ -828,9 +830,7 @@ pub async fn run_answerer(
         ws_close_tx,
     );
 
-    let data_channel = pending_data_channel
-        .lock()
-        .unwrap()
+    let data_channel = lock_recover(&pending_data_channel)
         .clone()
         .ok_or_else(|| RtcError::PeerConnection("data channel was never received".into()))?;
 

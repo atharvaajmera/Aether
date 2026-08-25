@@ -26,7 +26,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(turn_creds::turn_credentials_handler),
         )
         .route("/healthz", get(healthz))
-        .route("/room/:session_id", get(room_exists))
+        .route("/room/{session_id}", get(room_exists))
         .with_state(state)
 }
 

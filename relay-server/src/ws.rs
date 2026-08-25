@@ -181,7 +181,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 info!("RECV {}", signal_label(&other));
 
                 let routed = {
-                    let mut signaling = state.signaling.lock().expect("signaling mutex poisoned");
+                    let mut signaling = state.lock_signaling();
                     signaling.handle(other)
                 };
 
@@ -199,11 +199,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     // a later JoinSession on the same connection isn't rejected
                     // and so we don't double-send LeaveSession on disconnect.
                     if let Some(j) = joined.take() {
-                        state
-                            .peers
-                            .lock()
-                            .expect("peers mutex poisoned")
-                            .remove(&j.peer_id);
+                        remove_own_peer(&state, &j.peer_id, &outbound_tx);
                     }
                 }
             }
@@ -219,14 +215,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }) = joined
     {
         info!("DISCONNECT peer={peer_id} session={session_id}");
-        state
-            .peers
-            .lock()
-            .expect("peers mutex poisoned")
-            .remove(&peer_id);
+        remove_own_peer(&state, &peer_id, &outbound_tx);
 
         let routed = {
-            let mut signaling = state.signaling.lock().expect("signaling mutex poisoned");
+            let mut signaling = state.lock_signaling();
             signaling.handle(SignalMessage::LeaveSession {
                 peer_id: peer_id.clone(),
                 session_id,
@@ -255,6 +247,20 @@ fn send_error(
     outbound_tx.send(Message::from(payload))
 }
 
+fn remove_own_peer(
+    state: &Arc<AppState>,
+    peer_id: &str,
+    outbound_tx: &mpsc::UnboundedSender<Message>,
+) {
+    let mut peers = state.lock_peers();
+    if peers
+        .get(peer_id)
+        .is_some_and(|handle| handle.sender.same_channel(outbound_tx))
+    {
+        peers.remove(peer_id);
+    }
+}
+
 /// Handles a `JoinSession` message end-to-end: registers the peer's outbound
 /// channel, runs it through the shared `SignalingState`, forwards the
 /// resulting notifications, and then synthesizes `PeerJoined` messages back
@@ -276,12 +282,24 @@ async fn do_join(
     // peer's notification races in concurrently it can find us. (The
     // signaling mutex serializes this against concurrent handle() calls
     // anyway, since we hold the peers lock only briefly below.)
-    state.peers.lock().expect("peers mutex poisoned").insert(
-        peer_id.clone(),
-        PeerHandle {
-            sender: outbound_tx.clone(),
-        },
-    );
+    //
+    // Reject the join if the peer_id is already held by another active
+    // connection. Peer ids are client-generated, so a collision (accidental
+    // or malicious) would otherwise clobber the existing connection's routing
+    // handle and mis-deliver its signals. The check-and-insert is atomic under
+    // the peers lock.
+    {
+        let mut peers = state.lock_peers();
+        if peers.contains_key(&peer_id) {
+            return Err(plenum::signaling::SignalingError::DuplicatePeerId { peer_id });
+        }
+        peers.insert(
+            peer_id.clone(),
+            PeerHandle {
+                sender: outbound_tx.clone(),
+            },
+        );
+    }
 
     let join_msg = SignalMessage::JoinSession {
         peer_id: peer_id.clone(),
@@ -289,7 +307,7 @@ async fn do_join(
     };
 
     let result = {
-        let mut signaling = state.signaling.lock().expect("signaling mutex poisoned");
+        let mut signaling = state.lock_signaling();
         signaling.handle(join_msg)
     };
 
@@ -297,11 +315,7 @@ async fn do_join(
         Ok(notifications) => notifications,
         Err(err) => {
             // Roll back peer registration on failure.
-            state
-                .peers
-                .lock()
-                .expect("peers mutex poisoned")
-                .remove(&peer_id);
+            state.lock_peers().remove(&peer_id);
             return Err(err);
         }
     };
@@ -312,7 +326,7 @@ async fn do_join(
     // Synthesize PeerJoined for the newly-joined peer, one per peer that was
     // already in the room (i.e. everyone except ourselves).
     let existing_peers = {
-        let signaling = state.signaling.lock().expect("signaling mutex poisoned");
+        let signaling = state.lock_signaling();
         signaling.peers_in_session(&session_id).unwrap_or_default()
     };
 
@@ -347,9 +361,7 @@ async fn route_signals(state: &Arc<AppState>, signals: Vec<RoutedSignal>) {
             signal.recipient_peer_id
         );
         let handle = state
-            .peers
-            .lock()
-            .expect("peers mutex poisoned")
+            .lock_peers()
             .get(&signal.recipient_peer_id)
             .cloned();
 

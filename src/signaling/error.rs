@@ -25,6 +25,9 @@ pub enum SignalingError {
         session_id: String,
         target_peer_id: String,
     },
+    DuplicatePeerId {
+        peer_id: String,
+    },
     InvalidSignal(String),
     Json(String),
 }
@@ -52,6 +55,9 @@ impl fmt::Display for SignalingError {
                 f,
                 "peer {peer_id} cannot signal {target_peer_id} outside session {session_id}"
             ),
+            Self::DuplicatePeerId { peer_id } => {
+                write!(f, "peer id {peer_id} is already in use by another connection")
+            }
             Self::InvalidSignal(message) => write!(f, "invalid signaling message: {message}"),
             Self::Json(message) => write!(f, "json signaling error: {message}"),
         }
