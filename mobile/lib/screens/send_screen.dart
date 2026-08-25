@@ -41,6 +41,8 @@ class _SendScreenState extends State<SendScreen> {
   final TextEditingController _roomCodeController = TextEditingController();
   bool _isConnectingRemote = false;
   String? _sessionToken;
+  /// Ownership token for the currently-held [TransferLock], if any.
+  Object? _lockToken;
   StreamSubscription<String>? _transferSub;
   StreamSubscription<String>? _discoverySub;
   bool _transferActive = false;
@@ -70,7 +72,10 @@ class _SendScreenState extends State<SendScreen> {
     _discoverySub?.cancel();
     _autoResetTimer?.cancel();
     _roomCodeController.dispose();
-    if (!_transferActive) TransferLock.release();
+    if (!_transferActive) {
+      TransferLock.release(_lockToken);
+      _lockToken = null;
+    }
     super.dispose();
   }
 
@@ -312,8 +317,10 @@ class _SendScreenState extends State<SendScreen> {
       _transferActive = true;
       _showSuccess = false;
     });
+    Object? lockToken;
     try {
-      await TransferLock.acquire();
+      lockToken = await TransferLock.acquire();
+      _lockToken = lockToken;
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -332,11 +339,13 @@ class _SendScreenState extends State<SendScreen> {
     ).listen(
       _handleTransferEvent,
       onDone: () {
-        TransferLock.release();
+        TransferLock.release(lockToken);
+        _lockToken = null;
         if (mounted) setState(() => _transferActive = false);
       },
       onError: (e) {
-        TransferLock.release();
+        TransferLock.release(lockToken);
+        _lockToken = null;
         if (mounted) {
           setState(() {
             _transferStatus = friendlyError(e);
@@ -379,6 +388,7 @@ class _SendScreenState extends State<SendScreen> {
       _isConnectingRemote = true;
     });
 
+    Object? lockToken;
     try {
       final exists = await InternetSettings.roomExists(relayServerUrl, roomCode);
       if (!exists) {
@@ -404,7 +414,8 @@ class _SendScreenState extends State<SendScreen> {
         _transferActive = true;
         _showSuccess = false;
       });
-      await TransferLock.acquire();
+      lockToken = await TransferLock.acquire();
+      _lockToken = lockToken;
       _transferSub = startSendRemote(
         filePath: _selectedFile!,
         relayServerUrl: relayServerUrl,
@@ -417,7 +428,8 @@ class _SendScreenState extends State<SendScreen> {
       ).listen(
         _handleTransferEvent,
         onDone: () {
-          TransferLock.release();
+          TransferLock.release(lockToken);
+          _lockToken = null;
           if (mounted) {
             setState(() {
               _isConnectingRemote = false;
@@ -426,7 +438,8 @@ class _SendScreenState extends State<SendScreen> {
           }
         },
         onError: (e) {
-          TransferLock.release();
+          TransferLock.release(lockToken);
+          _lockToken = null;
           if (mounted) {
             setState(() {
               _transferStatus = friendlyError(e);
@@ -438,7 +451,8 @@ class _SendScreenState extends State<SendScreen> {
         },
       );
     } catch (e) {
-      TransferLock.release();
+      TransferLock.release(lockToken);
+      if (identical(_lockToken, lockToken)) _lockToken = null;
       setState(() {
         _transferStatus = friendlyError(e);
         _isConnectingRemote = false;

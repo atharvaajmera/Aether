@@ -43,6 +43,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   StreamSubscription<String>? _localSub;
   StreamSubscription<String>? _remoteSub;
   String? _sessionToken;
+  Object? _lockToken;
   bool _requirePinActive = false;
   bool _autoAcceptActive = true;
 
@@ -82,7 +83,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     // Clean up app-dir copy if it was already exported to Downloads.
     _deleteAppDirCopyIfExported();
     if (!active) {
-      TransferLock.release();
+      TransferLock.release(_lockToken);
+      _lockToken = null;
       _localSub?.cancel();
       _remoteSub?.cancel();
     }
@@ -103,9 +105,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }
   }
 
-  void _stopReceiving() {
-    // Cancel Rust-side transfer loop first, then drop the Dart subscriptions.
-    TransferLock.release();
+  void _stopReceiving({Object? lockToken}) {
+    TransferLock.release(lockToken ?? _lockToken);
+    _lockToken = null;
     final token = _sessionToken;
     if (token != null) {
       try {
@@ -166,8 +168,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       _statusMessage = 'Listening for incoming files...';
     });
 
+    Object? lockToken;
     try {
-      await TransferLock.acquire();
+      lockToken = await TransferLock.acquire();
+      _lockToken = lockToken;
     } catch (error) {
       if (mounted) {
         _handleLogEvent({
@@ -205,13 +209,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
           });
         }
       } else if (event['Transfer'] != null) {
-        _handleTransferEvent(event['Transfer'], outputDir);
+        _handleTransferEvent(event['Transfer'], outputDir, lockToken);
       }
     }, onDone: () {
-      TransferLock.release();
+      TransferLock.release(lockToken);
+      _lockToken = null;
       if (mounted) setState(() => _isListening = false);
     }, onError: (e) {
-      TransferLock.release();
+      TransferLock.release(lockToken);
+      _lockToken = null;
       setState(() {
         _statusMessage = friendlyError(e);
         _isListening = false;
@@ -219,11 +225,11 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     });
   }
 
-  void _handleTransferEvent(dynamic transEvent, String outputDir) {
+  void _handleTransferEvent(dynamic transEvent, String outputDir, Object? lockToken) {
     if (transEvent['StateChanged'] != null) {
       final state = transEvent['StateChanged']['state'];
       if (state == 'Closed') {
-        _stopReceiving();
+        _stopReceiving(lockToken: lockToken);
         setState(() => _statusMessage = 'Connection closed');
       } else {
         setState(() {
@@ -251,13 +257,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         );
       }
     } else if (transEvent['Cancelled'] != null) {
-      TransferLock.release();
+      TransferLock.release(lockToken);
+      _lockToken = null;
       setState(() {
         _statusMessage = 'Transfer cancelled';
         _progress = null;
       });
     } else if (transEvent['Declined'] != null) {
-      TransferLock.release();
+      TransferLock.release(lockToken);
+      _lockToken = null;
       final reason = transEvent['Declined']['reason'];
       setState(() {
         _statusMessage = reason == 'cancelled'
@@ -309,7 +317,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         }
       });
     } else if (transEvent['Completed'] != null) {
-      TransferLock.release();
+      TransferLock.release(lockToken);
+      _lockToken = null;
       final summary = transEvent['Completed'];
       final fileName = summary['file_name'];
       final localPath = fileName != null ? '$outputDir/$fileName' : null;
@@ -482,8 +491,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       iceServers,
     );
 
+    Object? lockToken;
     try {
-      await TransferLock.acquire();
+      lockToken = await TransferLock.acquire();
+      _lockToken = lockToken;
     } catch (error) {
       if (mounted) {
         _handleLogEvent({
@@ -513,13 +524,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         return;
       }
       if (event['Transfer'] != null) {
-        _handleTransferEvent(event['Transfer'], outputDir);
+        _handleTransferEvent(event['Transfer'], outputDir, lockToken);
       }
     }, onDone: () {
-      TransferLock.release();
+      TransferLock.release(lockToken);
+      _lockToken = null;
       if (mounted) setState(() => _remoteStarted = false);
     }, onError: (e) {
-      TransferLock.release();
+      TransferLock.release(lockToken);
+      _lockToken = null;
       if (mounted) {
         setState(() {
           _statusMessage = friendlyError(e);
