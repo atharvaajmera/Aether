@@ -51,6 +51,12 @@ const ReceivePage: React.FC = () => {
   const terminalEventRef = useRef(false);
   const activeSessionRef = useRef(0);
   const sessionFloorRef = useRef(0);
+  // Resolves when the previous receiver session has fully finished in the
+  // backend. React cleanup callbacks can't be async, so instead of awaiting
+  // teardown in the destructor (impossible), the *next* session waits on this
+  // barrier before starting — preventing a new session from binding a port or
+  // relay room the outgoing one hasn't released yet.
+  const teardownRef = useRef<Promise<void>>(Promise.resolve());
   const { settings } = useSettings();
   const outputDirRef = useRef<string>("");
 
@@ -82,8 +88,9 @@ const ReceivePage: React.FC = () => {
   };
 
   const handleAcceptResponse = (accept: boolean) => {
+    const sessionId = activeSessionRef.current;
     setIncoming(null);
-    invoke("respond_to_incoming_command", { accept }).catch(() => setStatus("Could not respond to the transfer request. Please try again."));
+    invoke("respond_to_incoming_command", { sessionId, accept }).catch(() => setStatus("Could not respond to the transfer request. Please try again."));
     if (!accept) setStatus("Transfer declined");
   };
 
@@ -97,7 +104,7 @@ const ReceivePage: React.FC = () => {
     if (nextMode === mode) return;
     setStatus("Switching receiver mode...");
     try {
-      await invoke("cancel_session_command");
+      await invoke("cancel_session_command", { sessionId: activeSessionRef.current });
     } catch (err) {
       setStatus("Could not switch modes cleanly. Please try again.");
     }
@@ -241,8 +248,14 @@ const ReceivePage: React.FC = () => {
 
     let unlisten: UnlistenFn | undefined;
     let cancelled = false;
+    const prior = teardownRef.current;
+    let markDone: () => void = () => {};
+    teardownRef.current = new Promise<void>((resolve) => { markDone = resolve; });
 
     const setupReceiver = async () => {
+      // Wait for any previous session to fully complete in the backend
+      await prior;
+      if (cancelled) return;
       // 1. Listen for events
       const fn = await listen<PlenumEventEnvelope>("plenum-event", (event) => {
         const { session_id, event: payload } = event.payload;
@@ -295,13 +308,16 @@ const ReceivePage: React.FC = () => {
       }
     };
 
-    setupReceiver();
+    setupReceiver().finally(() => markDone());
 
     return () => {
       cancelled = true;
       // Abandon this session so a trailing event with same id can't hit the next mode.
       abandonSession(activeSessionRef, sessionFloorRef);
       if (unlisten) unlisten();
+      // Signal the backend to stop. We can't await here (React cleanup is sync),
+      // but the barrier above makes the next session wait for this one to settle.
+      invoke("cancel_session_command", { sessionId: activeSessionRef.current }).catch(console.error);
     };
   }, [mode]);
 
@@ -312,8 +328,14 @@ const ReceivePage: React.FC = () => {
     setRoomCode(null);
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
+    const prior = teardownRef.current;
+    let markDone: () => void = () => {};
+    teardownRef.current = new Promise<void>((resolve) => { markDone = resolve; });
 
     const setupRemoteReceiver = async () => {
+      // Wait for any previous session to fully complete in the backend
+      await prior;
+      if (cancelled) return;
       const fn = await listen<PlenumEventEnvelope>("plenum-event", (event) => {
         const { session_id, event: payload } = event.payload;
         // Drop events from a superseded session so they can't mutate this one.
@@ -369,18 +391,19 @@ const ReceivePage: React.FC = () => {
       }
     };
 
-    setupRemoteReceiver();
+    setupRemoteReceiver().finally(() => markDone());
 
     return () => {
       cancelled = true;
       // Abandon this session so a trailing event with same id can't hit the next mode.
       abandonSession(activeSessionRef, sessionFloorRef);
       if (unlisten) unlisten();
+      invoke("cancel_session_command", { sessionId: activeSessionRef.current }).catch(console.error);
     };
   }, [mode]);
 
   useEffect(() => () => {
-    invoke("cancel_session_command").catch(console.error);
+    invoke("cancel_session_command", { sessionId: activeSessionRef.current }).catch(console.error);
   }, []);
 
   return (

@@ -363,7 +363,7 @@ const SendPage: React.FC = () => {
     if (isTransferActive || isConnectingRemote) {
       terminalEventRef.current = true;
       try {
-        await invoke("cancel_session_command");
+        await invoke("cancel_session_command", { sessionId: activeSessionRef.current });
       } catch (err) {
         console.error("Cancel on mode switch failed:", err);
       }

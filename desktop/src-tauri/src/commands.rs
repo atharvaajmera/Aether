@@ -4,15 +4,22 @@ use plenum::app::types::{
     ReceiveRemoteRequest, ReceiveRequest, SendRemoteRequest, SendRequest, SessionControl,
     TransferSummary,
 };
+// Only referenced by the dev-only diagnostic logging path.
+#[cfg(debug_assertions)]
+use plenum::app::types::LogLevel;
 use plenum::signaling::IceServer;
 use serde_json::json;
-use std::fs::{self, File};
+use std::collections::HashMap;
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
+// `Manager` powers `app.path()`, used only by dev-only log file handling.
+#[cfg(debug_assertions)]
+use tauri::Manager;
 
 fn unix_millis() -> u128 {
     SystemTime::now()
@@ -30,13 +37,97 @@ fn emit_event(app: &AppHandle, session_id: u64, event: PlenumEvent) {
     );
 }
 
-fn create_transfer_log(app: &AppHandle, role: &str) -> Option<(PathBuf, BufWriter<File>)> {
-    let directory = app.path().app_log_dir().ok()?;
-    fs::create_dir_all(&directory).ok()?;
+/// Diagnostic transfer logging is a **development-only** aid.
+///
+/// Release builds persist nothing to disk — no output directories, filenames,
+/// peer/device names, or network diagnostics ever hit a log file — so there is
+/// no retention/consent surface to manage in production. In debug builds a
+/// per-transfer `<role>-<ts>.jsonl` is written to the app log directory and
+/// pruned by [`cleanup_old_transfer_logs`].
+///
+/// Returns `Err` (dev only) so the caller can tell the user diagnostics are
+/// unavailable instead of failing silently.
+#[cfg(debug_assertions)]
+fn create_transfer_log(app: &AppHandle, role: &str) -> Result<(PathBuf, BufWriter<File>), String> {
+    let directory = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let path = directory.join(format!("{role}-{}.jsonl", unix_millis()));
-    let file = File::create(&path).ok()?;
-    Some((path, BufWriter::new(file)))
+    let file = File::create(&path).map_err(|e| e.to_string())?;
+    Ok((path, BufWriter::new(file)))
 }
+
+/// Opens a diagnostic log for a transfer, if diagnostics are enabled for this
+/// build.
+///
+/// Debug builds: creates the log and, on failure, emits a `Warn` event so the
+/// developer sees *why* diagnostics are missing (issue: silent `None`).
+/// Release builds: always `None` by design — the silence is expected, so no
+/// warning is emitted.
+#[cfg(debug_assertions)]
+fn open_transfer_log(
+    app: &AppHandle,
+    session_id: u64,
+    role: &str,
+) -> Option<(PathBuf, BufWriter<File>)> {
+    match create_transfer_log(app, role) {
+        Ok(log) => Some(log),
+        Err(err) => {
+            emit_event(
+                app,
+                session_id,
+                PlenumEvent::Log {
+                    level: LogLevel::Warn,
+                    message: format!("diagnostic log unavailable: {err}"),
+                },
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+fn open_transfer_log(
+    _app: &AppHandle,
+    _session_id: u64,
+    _role: &str,
+) -> Option<(PathBuf, BufWriter<File>)> {
+    None
+}
+
+/// Prunes diagnostic logs older than 7 days from the app log directory.
+///
+/// Called once at startup. No-op in release builds (which never write logs).
+#[cfg(debug_assertions)]
+pub fn cleanup_old_transfer_logs(app: &AppHandle) {
+    const MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+    let Ok(directory) = app.path().app_log_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        let aged_out = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age.as_secs() > MAX_AGE_SECS);
+        if aged_out {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub fn cleanup_old_transfer_logs(_app: &AppHandle) {}
 
 fn write_diagnostic(log: &mut Option<(PathBuf, BufWriter<File>)>, value: serde_json::Value) {
     let Some((_, writer)) = log.as_mut() else {
@@ -48,40 +139,68 @@ fn write_diagnostic(log: &mut Option<(PathBuf, BufWriter<File>)>, value: serde_j
     }
 }
 
-fn current_session() -> &'static Mutex<Option<(u64, SessionControl)>> {
-    static SESSION: OnceLock<Mutex<Option<(u64, SessionControl)>>> = OnceLock::new();
-    SESSION.get_or_init(|| Mutex::new(None))
+/// Registry of every currently-running transfer session, keyed by the numeric
+/// session id handed out by [`register_session`].
+///
+/// Previously this held a single global slot, so a second concurrent transfer
+/// (receiver + sender, overlapping mode switches, a stale command finishing
+/// after a new one started, or a future multi-window UI) would clobber the
+/// first, and the id-less `cancel`/`respond` commands acted on whichever
+/// session happened to occupy the slot. Keying by id makes every control
+/// operation target exactly the session the UI names.
+fn sessions() -> &'static Mutex<HashMap<u64, SessionControl>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<u64, SessionControl>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Locks the session registry, recovering the guard if a previous holder
+/// panicked. A poisoned lock must not wedge every subsequent transfer.
+fn lock_sessions() -> std::sync::MutexGuard<'static, HashMap<u64, SessionControl>> {
+    sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn register_session(control: SessionControl) -> u64 {
     static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    *current_session().lock().unwrap() = Some((session_id, control));
+    lock_sessions().insert(session_id, control);
     session_id
 }
 
 fn unregister_session(session_id: u64) {
-    let mut current = current_session().lock().unwrap();
-    if current.as_ref().is_some_and(|(id, _)| *id == session_id) {
-        *current = None;
-    }
+    lock_sessions().remove(&session_id);
 }
 
-#[tauri::command]
-pub fn respond_to_incoming_command(accept: bool) {
-    if let Some((_, control)) = current_session().lock().unwrap().as_ref() {
-        if accept {
-            control.accept();
-        } else {
-            control.decline();
-        }
-    }
+/// Looks up a session's control handle by id. Cloning is cheap — `SessionControl`
+/// is a pair of `Arc`s — and lets us drop the registry lock before signaling.
+fn session_control(session_id: u64) -> Option<SessionControl> {
+    lock_sessions().get(&session_id).cloned()
 }
 
-/// Requests cancellation of the currently running transfer session.
+/// Conveys the accept/decline signal to a specific pending session.
+///
+/// Returns an error (rather than `()`) so the UI can distinguish success from a
+/// session that no longer exists — already finished, timed out, cancelled, or a
+/// stale id from a superseded transfer. Without this, the UI would assume every
+/// response landed.
 #[tauri::command]
-pub fn cancel_session_command() {
-    if let Some((_, control)) = current_session().lock().unwrap().as_ref() {
+pub fn respond_to_incoming_command(session_id: u64, accept: bool) -> Result<(), String> {
+    let Some(control) = session_control(session_id) else {
+        return Err("transfer request is no longer active".to_string());
+    };
+    if accept {
+        control.accept();
+    } else {
+        control.decline();
+    }
+    Ok(())
+}
+
+// Requests cancellation of a specific running transfer session.
+#[tauri::command]
+pub fn cancel_session_command(session_id: u64) {
+    if let Some(control) = session_control(session_id) {
         control.cancel();
     }
 }
@@ -123,7 +242,9 @@ pub async fn receive_file_command(
         request.device_name = default_device_name();
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let mut diagnostic_log = create_transfer_log(&app, "lan-receive");
+        let mut core = PlenumCore::new();
+        let session_id = register_session(core.control());
+        let mut diagnostic_log = open_transfer_log(&app, session_id, "lan-receive");
         write_diagnostic(
             &mut diagnostic_log,
             json!({
@@ -134,8 +255,6 @@ pub async fn receive_file_command(
                 "output_dir": &request.output_dir,
             }),
         );
-        let mut core = PlenumCore::new();
-        let session_id = register_session(core.control());
         let mut sink = |event: PlenumEvent| {
             write_diagnostic(
                 &mut diagnostic_log,
