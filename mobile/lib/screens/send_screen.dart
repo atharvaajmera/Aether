@@ -75,6 +75,7 @@ class _SendScreenState extends State<SendScreen> {
     if (!_transferActive) {
       TransferLock.release(_lockToken);
       _lockToken = null;
+      unawaited(FilePicker.clearTemporaryFiles());
     }
     super.dispose();
   }
@@ -105,6 +106,24 @@ class _SendScreenState extends State<SendScreen> {
       _completedPeerName = null;
       _completedDuration = null;
       _completedMode = null;
+    });
+  }
+
+  Future<void> _clearSelectedTemporaryFile() async {
+    try {
+      final cleared = await FilePicker.clearTemporaryFiles();
+      if (cleared != true) {
+        debugPrint('File picker temporary files were not cleared');
+      }
+    } catch (error) {
+      debugPrint('Failed to clear file picker cache: $error');
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _selectedFile = null;
+      _selectedFileSize = null;
     });
   }
 
@@ -156,6 +175,9 @@ class _SendScreenState extends State<SendScreen> {
   }
 
   Future<void> _pickFile() async {
+    if (!_transferActive) {
+      await FilePicker.clearTemporaryFiles();
+    }
     FilePickerResult? result = await FilePicker.pickFiles();
     if (result != null) {
       setState(() {
@@ -342,6 +364,7 @@ class _SendScreenState extends State<SendScreen> {
         TransferLock.release(lockToken);
         _lockToken = null;
         if (mounted) setState(() => _transferActive = false);
+        unawaited(_clearSelectedTemporaryFile());
       },
       onError: (e) {
         TransferLock.release(lockToken);
@@ -353,6 +376,7 @@ class _SendScreenState extends State<SendScreen> {
             _transferActive = false;
           });
         }
+        unawaited(_clearSelectedTemporaryFile());
       },
     );
   }
@@ -436,6 +460,7 @@ class _SendScreenState extends State<SendScreen> {
               _transferActive = false;
             });
           }
+          unawaited(_clearSelectedTemporaryFile());
         },
         onError: (e) {
           TransferLock.release(lockToken);
@@ -448,6 +473,7 @@ class _SendScreenState extends State<SendScreen> {
               _transferActive = false;
             });
           }
+          unawaited(_clearSelectedTemporaryFile());
         },
       );
     } catch (e) {
@@ -582,6 +608,7 @@ class _SendScreenState extends State<SendScreen> {
                   _selectedFile = null;
                   _selectedFileSize = null;
                 });
+                unawaited(FilePicker.clearTemporaryFiles());
               },
             ),
           ],
