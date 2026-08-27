@@ -81,6 +81,18 @@ export type TransferDirection = "Send" | "Receive";
 // How the peers are connected: LAN TCP, direct P2P WebRTC, or TURN relay.
 export type TransferMode = "Lan" | "Direct" | "Relay";
 
+export type TransferUiPhase =
+    | "idle"
+    | "discovering"
+    | "listening"
+    | "connecting"
+    | "awaitingApproval"
+    | "transferring"
+    | "cancelling"
+    | "cancelled"
+    | "failed"
+    | "succeeded";
+
 export interface TransferSummary {
     direction: TransferDirection;
     file_name: string;

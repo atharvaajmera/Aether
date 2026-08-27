@@ -3,7 +3,7 @@ import { File, RefreshCcw, Monitor, Wifi, Globe, CheckCircle2 } from "lucide-rea
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { PlenumEventEnvelope, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, TransferEvent, IceServer } from "../types/rust";
+import { PlenumEventEnvelope, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, TransferEvent, IceServer, TransferUiPhase } from "../types/rust";
 import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration, progressPercent } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
@@ -36,6 +36,7 @@ const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Connect
 const SendPage: React.FC = () => {
   const { settings } = useSettings();
   const [mode, setMode] = useState<"local" | "internet">("local");
+  const [phase, setPhase] = useState<TransferUiPhase>("idle");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [peers, setPeers] = useState<DiscoverySummary[]>([]);
   const [isDiscovering, setIsDiscovering] = useState(false);
@@ -69,6 +70,7 @@ const SendPage: React.FC = () => {
     if (modeRef.current !== "local") return;
     const gen = ++discoveryGenRef.current;
     setIsDiscovering(true);
+    setPhase("discovering");
     setPeers([]);
 
     try {
@@ -81,7 +83,10 @@ const SendPage: React.FC = () => {
       console.error("Discovery error:", err);
     } finally {
       // Skip if this run was superseded/invalidated (mode switch, new search).
-      if (discoveryGenRef.current === gen) setIsDiscovering(false);
+      if (discoveryGenRef.current === gen) {
+        setIsDiscovering(false);
+        setPhase((prev) => (prev === "discovering" ? "idle" : prev));
+      }
     }
   };
 
@@ -126,12 +131,18 @@ const SendPage: React.FC = () => {
            }
          } else if ("Transfer" in payload) {
            const trans: TransferEvent = payload.Transfer;
+           if (terminalEventRef.current) {
+             // Terminal state has precedence: ignore late events
+             return;
+           }
             if ("StateChanged" in trans) {
               if (trans.StateChanged.state !== "Closed") {
+                setPhase("connecting");
                 setTransferStatus(friendlyState(trans.StateChanged.state));
               }
            } else if ("Started" in trans) {
               if (autoResetRef.current) clearTimeout(autoResetRef.current);
+              setPhase("transferring");
               setSendSuccess(false);
               setTransferStatus(trans.Started.resumed_bytes > 0
                 ? `Resuming ${trans.Started.file_name} from ${formatBytes(trans.Started.resumed_bytes)}...`
@@ -145,11 +156,14 @@ const SendPage: React.FC = () => {
               const connection = trans.ConnectionEstablished.mode === "Relay" ? "relay" : trans.ConnectionEstablished.mode === "Direct" ? "direct connection" : "local network";
               setTransferStatus(`Connected via ${connection}`);
            } else if ("AwaitingApproval" in trans) {
+              setPhase("awaitingApproval");
               setTransferStatus("Waiting for receiver to accept...");
            } else if ("Resumed" in trans) {
+              setPhase("transferring");
               setTransferStatus(`Resuming transfer from ${formatBytes(trans.Resumed.resumed_bytes)}...`);
               setProgress((current) => current ? { ...current, transferred: trans.Resumed.resumed_bytes } : current);
            } else if ("Progress" in trans) {
+              setPhase("transferring");
               setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
               if (transferStartRef.current) {
                 const elapsed = (Date.now() - transferStartRef.current) / 1000;
@@ -163,13 +177,20 @@ const SendPage: React.FC = () => {
               }
            } else if ("Declined" in trans) {
               terminalEventRef.current = true;
+              setPhase("failed");
               setTransferStatus(trans.Declined.reason === "timeout" ? "Receiver did not respond" : "Receiver declined the transfer");
               setProgress(null);
               setSpeedText(null);
               setEtaText(null);
               transferStartRef.current = null;
+              if (autoResetRef.current) clearTimeout(autoResetRef.current);
+              autoResetRef.current = setTimeout(() => {
+                setPhase("idle");
+                setTransferStatus("");
+              }, 2000);
            } else if ("Failed" in trans) {
               terminalEventRef.current = true;
+              setPhase("failed");
               setTransferStatus(trans.Failed.message);
               setProgress(null);
               setSpeedText(null);
@@ -177,13 +198,20 @@ const SendPage: React.FC = () => {
               transferStartRef.current = null;
            } else if ("Cancelled" in trans) {
               terminalEventRef.current = true;
-              setTransferStatus("Transfer cancelled");
+              setPhase("cancelled");
+              setTransferStatus("Transfer cancelled\nThe partial file can be resumed later.");
               setProgress(null);
               setSpeedText(null);
               setEtaText(null);
               transferStartRef.current = null;
+              if (autoResetRef.current) clearTimeout(autoResetRef.current);
+              autoResetRef.current = setTimeout(() => {
+                setPhase("idle");
+                setTransferStatus("");
+              }, 2000);
            } else if ("Completed" in trans) {
              terminalEventRef.current = true;
+             setPhase("succeeded");
              const summary: TransferSummary = trans.Completed;
              const peerLabel = summary.peer_name ?? summary.peer ?? "device";
              addHistoryEntry({
@@ -207,12 +235,15 @@ const SendPage: React.FC = () => {
               transferStartRef.current = null;
              if (autoResetRef.current) clearTimeout(autoResetRef.current);
              autoResetRef.current = setTimeout(() => {
+               setPhase("idle");
                setSendSuccess(false);
                setTransferStatus("");
              }, 4000);
             }
          } else if ("Log" in payload) {
-           logToConsole(payload.Log);
+           if (!terminalEventRef.current) {
+             logToConsole(payload.Log);
+           }
          }
       });
 
@@ -277,6 +308,7 @@ const SendPage: React.FC = () => {
 
     setTransferStatus("Connecting to device...");
     terminalEventRef.current = false;
+    setPhase("connecting");
     setIsTransferActive(true);
     const peer = pinInputPeer;
     setPinInputPeer(null);
@@ -294,7 +326,11 @@ const SendPage: React.FC = () => {
       console.log("Send completed:", result);
     } catch (err) {
       console.error("Send error:", err);
-      if (!terminalEventRef.current) setTransferStatus("Error: " + err);
+      if (!terminalEventRef.current) {
+        terminalEventRef.current = true;
+        setPhase("failed");
+        setTransferStatus("Error: " + err);
+      }
       setProgress(null);
     } finally {
       setIsTransferActive(false);
@@ -319,6 +355,7 @@ const SendPage: React.FC = () => {
 
     setTransferStatus("Connecting to relay...");
     terminalEventRef.current = false;
+    setPhase("connecting");
     setIsConnectingRemote(true);
     setIsTransferActive(true);
 
@@ -349,7 +386,11 @@ const SendPage: React.FC = () => {
       console.log("Send completed:", result);
     } catch (err) {
       console.error("Send error:", err);
-      if (!terminalEventRef.current) setTransferStatus("Error: " + err);
+      if (!terminalEventRef.current) {
+        terminalEventRef.current = true;
+        setPhase("failed");
+        setTransferStatus("Error: " + err);
+      }
       setProgress(null);
     } finally {
       setIsConnectingRemote(false);
@@ -370,6 +411,7 @@ const SendPage: React.FC = () => {
     }
     abandonSession(activeSessionRef, sessionFloorRef);
     if (autoResetRef.current) clearTimeout(autoResetRef.current);
+    setPhase("idle");
     setIsTransferActive(false);
     setIsConnectingRemote(false);
     setPinInputPeer(null);
@@ -382,6 +424,17 @@ const SendPage: React.FC = () => {
     setMode(nextMode);
   };
 
+  const handleCancelTransfer = async () => {
+    if (phase === "cancelling" || terminalEventRef.current) return;
+    setPhase("cancelling");
+    setTransferStatus("Cancelling transfer...");
+    try {
+      await invoke("cancel_session_command", { sessionId: activeSessionRef.current });
+    } catch (err) {
+      console.error("Cancel failed:", err);
+    }
+  };
+
   const handleSelectFile = async () => {
     try {
       const selected = await open({ multiple: false, directory: false });
@@ -392,8 +445,12 @@ const SendPage: React.FC = () => {
       console.error(err);
     }
   };
+
+  const isSuccess = phase === "succeeded" || sendSuccess;
+  const isInFlight = (phase === "connecting" || phase === "awaitingApproval" || phase === "transferring" || phase === "cancelling" || isTransferActive || isConnectingRemote) && !isSuccess;
+
   return (
-    <div style={{ position: "relative", height: "100%" }}>
+    <div style={{ position: "relative", height: "100%" }} data-phase={phase}>
       {isDragging && (
         <div style={{
           position: "absolute",
@@ -458,9 +515,9 @@ const SendPage: React.FC = () => {
           </div>
 
           {transferStatus && (
-            <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center", border: sendSuccess ? "1px solid var(--accent-primary)" : "none" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "14px", color: sendSuccess ? "var(--text-primary)" : "var(--text-secondary)", fontWeight: sendSuccess ? 600 : 400 }}>
-                {sendSuccess && <CheckCircle2 size={18} color="var(--accent-primary)" />}
+            <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center", border: isSuccess ? "1px solid var(--accent-primary)" : "none" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "14px", color: isSuccess ? "var(--text-primary)" : "var(--text-secondary)", fontWeight: isSuccess ? 600 : 400 }}>
+                {isSuccess && <CheckCircle2 size={18} color="var(--accent-primary)" />}
                 {transferStatus}
               </div>
               {progress && (
@@ -472,6 +529,26 @@ const SendPage: React.FC = () => {
                     <span>{Math.round(progressPercent(progress.transferred, progress.total))}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
                     {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
                   </div>
+                </div>
+              )}
+              {isInFlight && (
+                <div style={{ marginTop: "12px" }}>
+                  <button
+                    onClick={handleCancelTransfer}
+                    disabled={phase === "cancelling"}
+                    style={{
+                      padding: "6px 14px",
+                      borderRadius: "6px",
+                      border: "1px solid var(--border-color)",
+                      backgroundColor: "transparent",
+                      color: phase === "cancelling" ? "var(--text-secondary)" : "var(--accent-primary)",
+                      fontSize: "12px",
+                      cursor: phase === "cancelling" ? "not-allowed" : "pointer",
+                      opacity: phase === "cancelling" ? 0.6 : 1,
+                    }}
+                  >
+                    {phase === "cancelling" ? "Cancelling..." : "Cancel transfer"}
+                  </button>
                 </div>
               )}
             </div>
@@ -561,9 +638,9 @@ const SendPage: React.FC = () => {
         ))}
 
         {transferStatus && (
-          <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center", border: sendSuccess ? "1px solid var(--accent-primary)" : "none" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "14px", color: sendSuccess ? "var(--text-primary)" : "var(--text-secondary)", fontWeight: sendSuccess ? 600 : 400 }}>
-              {sendSuccess && <CheckCircle2 size={18} color="var(--accent-primary)" />}
+          <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center", border: isSuccess ? "1px solid var(--accent-primary)" : "none" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "14px", color: isSuccess ? "var(--text-primary)" : "var(--text-secondary)", fontWeight: isSuccess ? 600 : 400 }}>
+              {isSuccess && <CheckCircle2 size={18} color="var(--accent-primary)" />}
               {transferStatus}
             </div>
             {progress && (
@@ -575,6 +652,26 @@ const SendPage: React.FC = () => {
                   <span>{Math.round(progressPercent(progress.transferred, progress.total))}%  •  {formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
                   {speedText && <span>{speedText}{etaText ? ` • ${etaText}` : ""}</span>}
                 </div>
+              </div>
+            )}
+            {isInFlight && (
+              <div style={{ marginTop: "12px" }}>
+                <button
+                  onClick={handleCancelTransfer}
+                  disabled={phase === "cancelling"}
+                  style={{
+                    padding: "6px 14px",
+                    borderRadius: "6px",
+                    border: "1px solid var(--border-color)",
+                    backgroundColor: "transparent",
+                    color: phase === "cancelling" ? "var(--text-secondary)" : "var(--accent-primary)",
+                    fontSize: "12px",
+                    cursor: phase === "cancelling" ? "not-allowed" : "pointer",
+                    opacity: phase === "cancelling" ? 0.6 : 1,
+                  }}
+                >
+                  {phase === "cancelling" ? "Cancelling..." : "Cancel transfer"}
+                </button>
               </div>
             )}
           </div>

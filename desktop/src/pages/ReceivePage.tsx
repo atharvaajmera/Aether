@@ -4,7 +4,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { downloadDir } from "@tauri-apps/api/path";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Copy, Check, Wifi, Globe, FolderOpen, CheckCircle2 } from "lucide-react";
-import { PlenumEventEnvelope, TransferEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary, IceServer } from "../types/rust";
+import { PlenumEventEnvelope, TransferEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary, IceServer, TransferUiPhase } from "../types/rust";
 import { useSettings } from "../context/SettingsContext";
 import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration, progressPercent } from "../utils/format";
@@ -29,6 +29,7 @@ const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Connect
 
 const ReceivePage: React.FC = () => {
   const [mode, setMode] = useState<"local" | "internet">("local");
+  const [phase, setPhase] = useState<TransferUiPhase>("idle");
   const [deviceName, setDeviceName] = useState<string | null>("Loading...");
   const [localIp, setLocalIp] = useState<string | null>(null);
   const [username, setUsername] = useState<string | null>(null);
@@ -91,7 +92,11 @@ const ReceivePage: React.FC = () => {
     const sessionId = activeSessionRef.current;
     setIncoming(null);
     invoke("respond_to_incoming_command", { sessionId, accept }).catch(() => setStatus("Could not respond to the transfer request. Please try again."));
-    if (!accept) setStatus("Transfer declined");
+    if (!accept) {
+      terminalEventRef.current = true;
+      setPhase("failed");
+      setStatus("Transfer declined");
+    }
   };
 
   const handleOpenFolder = () => {
@@ -103,6 +108,7 @@ const ReceivePage: React.FC = () => {
   const handleModeChange = async (nextMode: "local" | "internet") => {
     if (nextMode === mode) return;
     setStatus("Switching receiver mode...");
+    setPhase("idle");
     try {
       await invoke("cancel_session_command", { sessionId: activeSessionRef.current });
     } catch (err) {
@@ -113,17 +119,24 @@ const ReceivePage: React.FC = () => {
 
   // Shared per-event handler for both local and internet receivers.
   const handleTransferEvent = (trans: TransferEvent) => {
+    if (terminalEventRef.current) {
+      // Terminal state has precedence: ignore late events
+      return;
+    }
     if ("StateChanged" in trans) {
       if (trans.StateChanged.state !== "Closed") {
         if (trans.StateChanged.state === "Listening") {
+          setPhase("listening");
           setStatus("Ready to receive files");
         } else {
+          setPhase("connecting");
           setStatus(friendlyState(trans.StateChanged.state));
         }
       }
     } else if ("IncomingRequest" in trans) {
       const req = trans.IncomingRequest;
       if (!settingsRef.current.receive.autoAccept) {
+        setPhase("awaitingApproval");
         setIncoming({
           fileName: req.file_name,
           totalBytes: req.total_bytes,
@@ -134,6 +147,7 @@ const ReceivePage: React.FC = () => {
       } else {
         // Auto-accept skips the dialog. Surface the file/sender explicitly so the
         // user has confirmation of what was accepted even if negotiation stalls.
+        setPhase("connecting");
         const sender = req.sender_name ?? req.peer ?? "device";
         setStatus(`Accepting ${req.file_name} (${formatBytes(req.total_bytes)}) from ${sender}...`);
       }
@@ -142,14 +156,16 @@ const ReceivePage: React.FC = () => {
       setStatus(`Connected via ${connection}`);
     } else if ("Cancelled" in trans) {
       terminalEventRef.current = true;
+      setPhase("cancelled");
       setIncoming(null);
-      setStatus("Transfer cancelled");
+      setStatus("Sender cancelled the transfer");
       setProgress(null);
       setSpeedText(null);
       setEtaText(null);
       transferStartRef.current = null;
     } else if ("Declined" in trans) {
       terminalEventRef.current = true;
+      setPhase("failed");
       setIncoming(null);
       setStatus(trans.Declined.reason === "cancelled" ? "Sender cancelled the transfer" : "Transfer declined");
       setProgress(null);
@@ -158,6 +174,7 @@ const ReceivePage: React.FC = () => {
       transferStartRef.current = null;
     } else if ("Failed" in trans) {
       terminalEventRef.current = true;
+      setPhase("failed");
       setTransferFailed(true);
       setStatus(trans.Failed.message);
       setProgress(null);
@@ -166,6 +183,7 @@ const ReceivePage: React.FC = () => {
       transferStartRef.current = null;
     } else if ("Started" in trans) {
       terminalEventRef.current = false;
+      setPhase("transferring");
       setTransferFailed(false);
       setTechnicalDetails(null);
       setIncoming(null);
@@ -178,9 +196,11 @@ const ReceivePage: React.FC = () => {
       setSpeedText(null);
       setEtaText(null);
     } else if ("Resumed" in trans) {
+      setPhase("transferring");
       setStatus(`Resuming receive from ${formatBytes(trans.Resumed.resumed_bytes)}...`);
       setProgress((current) => current ? { ...current, transferred: trans.Resumed.resumed_bytes } : current);
     } else if ("Progress" in trans) {
+      setPhase("transferring");
       setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
       if (transferStartRef.current) {
         const elapsed = (Date.now() - transferStartRef.current) / 1000;
@@ -194,6 +214,7 @@ const ReceivePage: React.FC = () => {
       }
     } else if ("Completed" in trans) {
       terminalEventRef.current = true;
+      setPhase("succeeded");
       setTransferFailed(false);
       setTechnicalDetails(null);
       const summary: TransferSummary = trans.Completed;
@@ -297,12 +318,17 @@ const ReceivePage: React.FC = () => {
 
       while (!cancelled) {
         terminalEventRef.current = false;
+        setPhase("listening");
         try {
           const result = await invoke<TransferSummary>("receive_file_command", { request: req });
           void result;
           if (!cancelled) await new Promise(resolve => setTimeout(resolve, 1500));
         } catch (err) {
-          if (!cancelled && !terminalEventRef.current) setStatus(`Could not receive the file: ${err instanceof Error ? err.message : String(err)}`);
+          if (!cancelled && !terminalEventRef.current) {
+            terminalEventRef.current = true;
+            setPhase("failed");
+            setStatus(`Could not receive the file: ${err instanceof Error ? err.message : String(err)}`);
+          }
           break;
         }
       }
@@ -325,6 +351,7 @@ const ReceivePage: React.FC = () => {
     if (mode !== "internet") return;
 
     setStatus("Generating room code...");
+    setPhase("listening");
     setRoomCode(null);
     let cancelled = false;
     let unlisten: UnlistenFn | undefined;
@@ -387,7 +414,11 @@ const ReceivePage: React.FC = () => {
         const result = await invoke<TransferSummary>("receive_file_remote_command", { request: req });
         void result;
       } catch (err) {
-        if (!cancelled && !terminalEventRef.current) setStatus(`Could not connect: ${err instanceof Error ? err.message : String(err)}`);
+        if (!cancelled && !terminalEventRef.current) {
+          terminalEventRef.current = true;
+          setPhase("failed");
+          setStatus(`Could not connect: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     };
 
@@ -406,8 +437,10 @@ const ReceivePage: React.FC = () => {
     invoke("cancel_session_command", { sessionId: activeSessionRef.current }).catch(console.error);
   }, []);
 
+  const isFailed = phase === "failed" || transferFailed;
+
   return (
-    <div className="receive-container">
+    <div className="receive-container" data-phase={phase}>
       {incoming && <TransferAcceptDialog incoming={incoming} onRespond={handleAcceptResponse} />}
 
       <div className="card-grid" style={{ width: "100%", maxWidth: "300px", marginBottom: "24px" }}>
@@ -451,7 +484,7 @@ const ReceivePage: React.FC = () => {
           {status}
         </div>
 
-        {import.meta.env.DEV && transferFailed && technicalDetails && (
+        {import.meta.env.DEV && isFailed && technicalDetails && (
           <details className="technical-details">
             <summary>Technical details</summary>
             <p>{technicalDetails}</p>
