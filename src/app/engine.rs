@@ -884,6 +884,9 @@ fn emit_sender_failure<S: EventSink>(
     sequence_no: u32,
     last_ack: Instant,
 ) {
+    if matches!(error, AppError::Cancelled | AppError::Rejected(_)) {
+        return;
+    }
     sink.emit(PlenumEvent::Log {
         level: LogLevel::Error,
         message: format!(
@@ -1041,9 +1044,7 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     Ok(summary)
 }
 
-/// Legacy send path: sliding window with per-packet ACKs and retransmits.
-/// Required for RTC transports (message-based, no delivery guarantee surfaced
-/// to this layer) and for LAN peers that predate streaming mode.
+// Legacy send path: sliding window with per-packet ACKs and retransmits.
 fn run_windowed_send_loop<T: Transport, S: EventSink>(
     transport: &mut T,
     sink: &mut S,
@@ -1081,16 +1082,14 @@ fn run_windowed_send_loop<T: Transport, S: EventSink>(
             sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
                 direction: TransferDirection::Send,
             }));
-            let error = AppError::Cancelled;
-            emit_sender_failure(
-                sink,
-                &error,
-                bytes_sent,
-                bytes_acked,
-                *sequence_no,
-                last_inbound,
-            );
-            return Err(error);
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Info,
+                message: format!(
+                    "DIAG send cancelled: bytes_sent={bytes_sent} bytes_acked={bytes_acked} sequence={}",
+                    *sequence_no
+                ),
+            });
+            return Err(AppError::Cancelled);
         }
 
         let now = now_ms();
@@ -1135,15 +1134,11 @@ fn run_windowed_send_loop<T: Transport, S: EventSink>(
                         direction: TransferDirection::Send,
                         reason: reason.clone(),
                     }));
+                    sink.emit(PlenumEvent::Log {
+                        level: LogLevel::Info,
+                        message: format!("DIAG send declined: reason={reason}"),
+                    });
                     let error = AppError::Rejected(rejection_message(&reason));
-                    emit_sender_failure(
-                        sink,
-                        &error,
-                        bytes_sent,
-                        bytes_acked,
-                        *sequence_no,
-                        last_inbound,
-                    );
                     return Err(error);
                 }
                 PacketType::Accept | PacketType::Resume | PacketType::Auth => continue,
@@ -1313,16 +1308,13 @@ fn run_streaming_send_loop<T: Transport, S: EventSink>(
             sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
                 direction: TransferDirection::Send,
             }));
-            let error = AppError::Cancelled;
-            emit_sender_failure(
-                sink,
-                &error,
-                bytes_sent,
-                bytes_acked,
-                sequence_no,
-                last_inbound,
-            );
-            return Err(error);
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Info,
+                message: format!(
+                    "DIAG send cancelled: bytes_sent={bytes_sent} bytes_acked={bytes_acked} sequence={sequence_no}"
+                ),
+            });
+            return Err(AppError::Cancelled);
         }
 
         let remaining = file_size.saturating_sub(bytes_sent);
@@ -1397,15 +1389,11 @@ fn run_streaming_send_loop<T: Transport, S: EventSink>(
                         direction: TransferDirection::Send,
                         reason: reason.clone(),
                     }));
+                    sink.emit(PlenumEvent::Log {
+                        level: LogLevel::Info,
+                        message: format!("DIAG send declined: reason={reason}"),
+                    });
                     let error = AppError::Rejected(rejection_message(&reason));
-                    emit_sender_failure(
-                        sink,
-                        &error,
-                        bytes_sent,
-                        bytes_acked,
-                        sequence_no,
-                        last_inbound,
-                    );
                     return Err(error);
                 }
                 _ => {}
@@ -2043,10 +2031,6 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 if reason.is_empty() {
                     break;
                 }
-                sink.emit(PlenumEvent::Transfer(TransferEvent::Declined {
-                    direction: TransferDirection::Receive,
-                    reason: reason.clone(),
-                }));
                 let _ = save_receive_failure_checkpoint(
                     &mut file,
                     &mut checkpoint,
@@ -2054,7 +2038,28 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     receiver.next_expected(),
                     bytes_received,
                 );
-                return Err(AppError::Rejected(rejection_message(&reason)));
+                if reason == CLOSE_REASON_CANCELLED {
+                    sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
+                        direction: TransferDirection::Receive,
+                    }));
+                    sink.emit(PlenumEvent::Log {
+                        level: LogLevel::Info,
+                        message: format!(
+                            "DIAG recv cancelled by sender: bytes_received={bytes_received}"
+                        ),
+                    });
+                    return Err(AppError::Cancelled);
+                } else {
+                    sink.emit(PlenumEvent::Transfer(TransferEvent::Declined {
+                        direction: TransferDirection::Receive,
+                        reason: reason.clone(),
+                    }));
+                    sink.emit(PlenumEvent::Log {
+                        level: LogLevel::Info,
+                        message: format!("DIAG recv declined by sender: reason={reason}"),
+                    });
+                    return Err(AppError::Rejected(rejection_message(&reason)));
+                }
             }
             PacketType::Resume => {
                 // Sender's confirmation of the streaming-mode offer. Anything
