@@ -24,6 +24,8 @@ class SendScreen extends StatefulWidget {
 
 class _SendScreenState extends State<SendScreen> {
   TransferMode _mode = TransferMode.local;
+  TransferUiPhase _phase = TransferUiPhase.idle;
+  bool _terminalEventReceived = false;
   String? _selectedFile;
   final List<Map<String, dynamic>> _peers = [];
   bool _isDiscovering = false;
@@ -83,8 +85,13 @@ class _SendScreenState extends State<SendScreen> {
   /// Cancels an in-flight transfer: flips the Rust-side flag; the engine
   /// sends `Close` to the peer, emits `Cancelled`, and returns.
   void _cancelTransfer() {
+    if (_phase == TransferUiPhase.cancelling || _phase.isTerminal) return;
     final token = _sessionToken;
     if (token != null) {
+      setState(() {
+        _phase = TransferUiPhase.cancelling;
+        _transferStatus = 'Cancelling transfer...';
+      });
       try {
         cancelSession(sessionToken: token);
       } catch (_) {}
@@ -94,6 +101,8 @@ class _SendScreenState extends State<SendScreen> {
   void _resetTransferUi() {
     _autoResetTimer?.cancel();
     setState(() {
+      _phase = TransferUiPhase.idle;
+      _terminalEventReceived = false;
       _transferStatus = '';
       _progress = null;
       _totalBytes = null;
@@ -138,6 +147,9 @@ class _SendScreenState extends State<SendScreen> {
       _peers.clear();
       _transferStatus = '';
       _progress = null;
+      if (!_phase.isTerminal && _phase != TransferUiPhase.transferring && _phase != TransferUiPhase.connecting) {
+        _phase = TransferUiPhase.discovering;
+      }
     });
 
     _discoverySub = startDiscovery(timeoutSecs: BigInt.from(10)).listen((eventJson) {
@@ -148,6 +160,9 @@ class _SendScreenState extends State<SendScreen> {
         if (discEvent == 'PeerNotFound') {
           setState(() {
             _isDiscovering = false;
+            if (_phase == TransferUiPhase.discovering) {
+              _phase = TransferUiPhase.idle;
+            }
             _transferStatus = 'No devices found';
           });
         } else if (discEvent is Map) {
@@ -165,12 +180,22 @@ class _SendScreenState extends State<SendScreen> {
           } else if (discEvent['SearchStarted'] != null) {
             setState(() {
               _isDiscovering = true;
+              if (!_phase.isTerminal && _phase != TransferUiPhase.transferring && _phase != TransferUiPhase.connecting) {
+                _phase = TransferUiPhase.discovering;
+              }
             });
           }
         }
       }
     }, onDone: () {
-      if (mounted) setState(() => _isDiscovering = false);
+      if (mounted) {
+        setState(() {
+          _isDiscovering = false;
+          if (_phase == TransferUiPhase.discovering) {
+            _phase = TransferUiPhase.idle;
+          }
+        });
+      }
     });
   }
 
@@ -191,6 +216,7 @@ class _SendScreenState extends State<SendScreen> {
     if (!mounted) return;
     final event = jsonDecode(eventJson);
     if (event['Log'] != null) {
+      if (_terminalEventReceived) return;
       final log = event['Log'];
       final level = log['level'];
       if (level == 'Warn' || level == 'Error') {
@@ -204,10 +230,12 @@ class _SendScreenState extends State<SendScreen> {
     if (event['Transfer'] != null) {
       final trans = event['Transfer'];
       if (trans['StateChanged'] != null) {
+        if (_terminalEventReceived) return;
         final state = trans['StateChanged']['state'];
         if (state == 'Closed') {
-          if (!_showSuccess) {
+          if (!_showSuccess && !_phase.isTerminal) {
             setState(() {
+              _phase = TransferUiPhase.idle;
               _transferStatus = '';
               _progress = null;
               _totalBytes = null;
@@ -220,23 +248,35 @@ class _SendScreenState extends State<SendScreen> {
             });
           }
         } else {
-          setState(() => _transferStatus = friendlyState(state));
+          setState(() {
+            _phase = TransferUiPhase.connecting;
+            _transferStatus = friendlyState(state);
+          });
         }
       } else if (trans['AwaitingApproval'] != null) {
+        if (_terminalEventReceived) return;
         setState(() {
+          _phase = TransferUiPhase.awaitingApproval;
           _transferStatus = 'Waiting for the receiver to accept...';
           _transferActive = true;
         });
       } else if (trans['Cancelled'] != null) {
         setState(() {
-          _transferStatus = 'Transfer cancelled';
-          _progress = null;
+          _terminalEventReceived = true;
+          _phase = TransferUiPhase.cancelled;
+          _transferStatus = 'Transfer cancelled\nThe partial file can be resumed later.';
           _isConnectingRemote = false;
           _transferActive = false;
+        });
+        _autoResetTimer?.cancel();
+        _autoResetTimer = Timer(const Duration(seconds: 2), () {
+          if (mounted && _phase == TransferUiPhase.cancelled) _resetTransferUi();
         });
       } else if (trans['Declined'] != null) {
         final reason = trans['Declined']['reason'];
         setState(() {
+          _terminalEventReceived = true;
+          _phase = TransferUiPhase.failed;
           _transferStatus = switch (reason) {
             'pin_rejected' => 'Wrong pairing code — check the code on the receiver\'s screen',
             'cancelled' => 'The receiver cancelled the transfer',
@@ -246,15 +286,23 @@ class _SendScreenState extends State<SendScreen> {
           _isConnectingRemote = false;
           _transferActive = false;
         });
+        _autoResetTimer?.cancel();
+        _autoResetTimer = Timer(const Duration(seconds: 2), () {
+          if (mounted && _phase == TransferUiPhase.failed) _resetTransferUi();
+        });
       } else if (trans['Failed'] != null) {
         setState(() {
+          _terminalEventReceived = true;
+          _phase = TransferUiPhase.failed;
           _transferStatus = friendlyError(trans['Failed']['message']);
           _progress = null;
           _isConnectingRemote = false;
           _transferActive = false;
         });
       } else if (trans['Started'] != null) {
+        if (_terminalEventReceived) return;
         setState(() {
+          _phase = TransferUiPhase.transferring;
           _transferStatus = 'Sending ${trans['Started']['file_name']}...';
           _progress = 0.0;
           _totalBytes = trans['Started']['total_bytes'];
@@ -264,13 +312,17 @@ class _SendScreenState extends State<SendScreen> {
           _transferActive = true;
         });
       } else if (trans['Resumed'] != null) {
+        if (_terminalEventReceived) return;
         setState(() {
+          _phase = TransferUiPhase.transferring;
           final resumedBytes = trans['Resumed']['resumed_bytes'] ?? 0;
           final percent = _totalBytes != null && _totalBytes! > 0 ? (resumedBytes / _totalBytes! * 100).toStringAsFixed(1) : '0';
           _transferStatus = 'Resuming from $percent%...';
         });
       } else if (trans['Progress'] != null) {
+        if (_terminalEventReceived) return;
         setState(() {
+          _phase = TransferUiPhase.transferring;
           _transferredBytes = trans['Progress']['transferred_bytes'];
           _totalBytes = trans['Progress']['total_bytes'];
           if (_totalBytes != null && _totalBytes! > 0) {
@@ -290,6 +342,7 @@ class _SendScreenState extends State<SendScreen> {
           }
         });
       } else if (trans['Completed'] != null) {
+        _terminalEventReceived = true;
         final summary = trans['Completed'];
         final settings = context.read<SettingsService>();
         final peerName = summary['peer_name'] ??
@@ -308,6 +361,7 @@ class _SendScreenState extends State<SendScreen> {
           'timestamp': DateTime.now().toIso8601String(),
         });
         setState(() {
+          _phase = TransferUiPhase.succeeded;
           _transferStatus = elapsedMs != null
               ? 'Sent to $peerName in ${formatDuration(elapsedMs)}'
               : 'Sent to $peerName';
@@ -322,7 +376,7 @@ class _SendScreenState extends State<SendScreen> {
         });
         _autoResetTimer?.cancel();
         _autoResetTimer = Timer(const Duration(seconds: 8), () {
-          if (mounted && _showSuccess) _resetTransferUi();
+          if (mounted && _phase == TransferUiPhase.succeeded) _resetTransferUi();
         });
       }
     }
@@ -331,13 +385,17 @@ class _SendScreenState extends State<SendScreen> {
   Future<void> _sendToPeer(String address, String hostname, String? pin) async {
     if (_selectedFile == null) return;
     _currentTransferPeerName = hostname;
+    final deviceName = context.read<SettingsService>().deviceName;
 
     final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
     _sessionToken = sessionToken;
     _autoResetTimer?.cancel();
     setState(() {
+      _phase = TransferUiPhase.connecting;
+      _terminalEventReceived = false;
       _transferActive = true;
       _showSuccess = false;
+      _transferStatus = 'Connecting to $hostname...';
     });
     Object? lockToken;
     try {
@@ -346,6 +404,8 @@ class _SendScreenState extends State<SendScreen> {
     } catch (error) {
       if (mounted) {
         setState(() {
+          _terminalEventReceived = true;
+          _phase = TransferUiPhase.failed;
           _transferStatus = 'Transfer lock unavailable';
           _transferActive = false;
         });
@@ -356,24 +416,37 @@ class _SendScreenState extends State<SendScreen> {
       filePath: _selectedFile!,
       peerAddress: address,
       optionalPin: pin,
-      deviceName: context.read<SettingsService>().deviceName,
+      deviceName: deviceName,
       sessionToken: sessionToken,
     ).listen(
       _handleTransferEvent,
       onDone: () {
         TransferLock.release(lockToken);
         _lockToken = null;
-        if (mounted) setState(() => _transferActive = false);
+        if (mounted) {
+          setState(() {
+            _transferActive = false;
+            if (!_terminalEventReceived && !_phase.isTerminal) {
+              _phase = TransferUiPhase.idle;
+            }
+          });
+        }
         unawaited(_clearSelectedTemporaryFile());
       },
       onError: (e) {
         TransferLock.release(lockToken);
         _lockToken = null;
         if (mounted) {
+          if (_terminalEventReceived || _phase.isTerminal) {
+            // The semantic transfer event already updated the UI.
+            return;
+          }
           setState(() {
+            _transferActive = false;
+            _terminalEventReceived = true;
+            _phase = TransferUiPhase.failed;
             _transferStatus = friendlyError(e);
             _progress = null;
-            _transferActive = false;
           });
         }
         unawaited(_clearSelectedTemporaryFile());
@@ -395,7 +468,7 @@ class _SendScreenState extends State<SendScreen> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Room codes are 9 letters or numbers')));
       return;
     }
-    if (_isConnectingRemote) return;
+    if (_isConnectingRemote || _phase == TransferUiPhase.connecting || _phase == TransferUiPhase.transferring) return;
 
     final settings = context.read<SettingsService>();
     final relayServerUrl = settings.relayServerUrl;
@@ -408,6 +481,8 @@ class _SendScreenState extends State<SendScreen> {
     _currentTransferPeerName = 'Remote Device ($roomCode)';
 
     setState(() {
+      _phase = TransferUiPhase.connecting;
+      _terminalEventReceived = false;
       _transferStatus = 'Connecting to relay...';
       _isConnectingRemote = true;
     });
@@ -418,6 +493,8 @@ class _SendScreenState extends State<SendScreen> {
       if (!exists) {
         if (mounted) {
           setState(() {
+            _terminalEventReceived = true;
+            _phase = TransferUiPhase.failed;
             _transferStatus = 'Room not found. Ask the receiver to open Internet mode and share a new room code.';
             _isConnectingRemote = false;
           });
@@ -435,6 +512,8 @@ class _SendScreenState extends State<SendScreen> {
       _sessionToken = sessionToken;
       _autoResetTimer?.cancel();
       setState(() {
+        _phase = TransferUiPhase.connecting;
+        _terminalEventReceived = false;
         _transferActive = true;
         _showSuccess = false;
       });
@@ -458,6 +537,9 @@ class _SendScreenState extends State<SendScreen> {
             setState(() {
               _isConnectingRemote = false;
               _transferActive = false;
+              if (!_terminalEventReceived && !_phase.isTerminal) {
+                _phase = TransferUiPhase.idle;
+              }
             });
           }
           unawaited(_clearSelectedTemporaryFile());
@@ -466,11 +548,17 @@ class _SendScreenState extends State<SendScreen> {
           TransferLock.release(lockToken);
           _lockToken = null;
           if (mounted) {
+            if (_terminalEventReceived || _phase.isTerminal) {
+              // The semantic transfer event already updated the UI.
+              return;
+            }
             setState(() {
-              _transferStatus = friendlyError(e);
-              _progress = null;
               _isConnectingRemote = false;
               _transferActive = false;
+              _terminalEventReceived = true;
+              _phase = TransferUiPhase.failed;
+              _transferStatus = friendlyError(e);
+              _progress = null;
             });
           }
           unawaited(_clearSelectedTemporaryFile());
@@ -480,8 +568,11 @@ class _SendScreenState extends State<SendScreen> {
       TransferLock.release(lockToken);
       if (identical(_lockToken, lockToken)) _lockToken = null;
       setState(() {
+        _terminalEventReceived = true;
+        _phase = TransferUiPhase.failed;
         _transferStatus = friendlyError(e);
         _isConnectingRemote = false;
+        _transferActive = false;
       });
     }
   }
@@ -543,7 +634,6 @@ class _SendScreenState extends State<SendScreen> {
       }
     );
   }
-
 
   Widget _buildModeToggle() {
     return Row(
@@ -646,8 +736,7 @@ class _SendScreenState extends State<SendScreen> {
   }
 
   Widget _buildStatusCard() {
-    if (_transferStatus.isEmpty) return const SizedBox.shrink();
-    if (_showSuccess) {
+    if (_phase == TransferUiPhase.succeeded || _showSuccess) {
       return Container(
         margin: const EdgeInsets.only(top: 8),
         padding: const EdgeInsets.all(16),
@@ -720,6 +809,14 @@ class _SendScreenState extends State<SendScreen> {
       );
     }
 
+    if (_transferStatus.isEmpty) return const SizedBox.shrink();
+
+    final isInFlight = _phase == TransferUiPhase.connecting ||
+        _phase == TransferUiPhase.awaitingApproval ||
+        _phase == TransferUiPhase.transferring ||
+        _phase == TransferUiPhase.cancelling ||
+        _transferActive;
+
     return Container(
       margin: const EdgeInsets.only(top: 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -738,7 +835,7 @@ class _SendScreenState extends State<SendScreen> {
             maxLines: 3,
             overflow: TextOverflow.ellipsis,
           ),
-          if (_isConnectingRemote) ...[
+          if (_isConnectingRemote || _phase == TransferUiPhase.connecting || _phase == TransferUiPhase.cancelling) ...[
             const SizedBox(height: 8),
             const Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.accentPrimary))),
           ],
@@ -773,17 +870,26 @@ class _SendScreenState extends State<SendScreen> {
               ],
             ),
           ],
-          if (_transferActive && _progress != 1.0)
+          if (isInFlight && _progress != 1.0)
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: TextButton.icon(
-                onPressed: _cancelTransfer,
+                onPressed: _phase == TransferUiPhase.cancelling ? null : _cancelTransfer,
                 style: TextButton.styleFrom(
                   visualDensity: VisualDensity.compact,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-                icon: const Icon(Icons.cancel, color: AppTheme.accentPrimary, size: 18),
-                label: const Text('Cancel transfer', style: TextStyle(color: AppTheme.accentPrimary)),
+                icon: Icon(
+                  Icons.cancel,
+                  color: _phase == TransferUiPhase.cancelling ? AppTheme.textSecondary : AppTheme.accentPrimary,
+                  size: 18,
+                ),
+                label: Text(
+                  _phase == TransferUiPhase.cancelling ? 'Cancelling...' : 'Cancel transfer',
+                  style: TextStyle(
+                    color: _phase == TransferUiPhase.cancelling ? AppTheme.textSecondary : AppTheme.accentPrimary,
+                  ),
+                ),
               ),
             ),
           if (_progress == 1.0)

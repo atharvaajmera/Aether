@@ -1,5 +1,23 @@
 enum TransferMode { local, internet }
 
+enum TransferUiPhase {
+  idle,
+  discovering,
+  listening,
+  connecting,
+  awaitingApproval,
+  transferring,
+  cancelling,
+  cancelled,
+  failed,
+  succeeded;
+
+  bool get isTerminal =>
+      this == TransferUiPhase.succeeded ||
+      this == TransferUiPhase.cancelled ||
+      this == TransferUiPhase.failed;
+}
+
 String friendlyState(String state, {bool isReceive = false}) {
   switch (state) {
     case 'Discovering':
@@ -18,6 +36,17 @@ String friendlyState(String state, {bool isReceive = false}) {
       return 'Connection closed';
     default:
       return 'Connecting to device...';
+  }
+}
+
+String friendlyConnectionMode(dynamic mode) {
+  switch (mode) {
+    case 'Relay':
+      return 'relay';
+    case 'Direct':
+      return 'direct connection';
+    default:
+      return 'local network';
   }
 }
 

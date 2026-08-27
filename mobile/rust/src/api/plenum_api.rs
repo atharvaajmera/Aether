@@ -1,5 +1,6 @@
 use crate::frb_generated::StreamSink;
 use flutter_rust_bridge::frb;
+use plenum::app::AppError;
 use plenum::app::engine::PlenumCore;
 use plenum::app::types::{
     CorePermissions, DiscoverRequest, ReceiveRemoteRequest, ReceiveRequest, SendRemoteRequest,
@@ -112,6 +113,7 @@ pub fn start_send(
     unregister_session(&session_token);
     match result {
         Ok(summary) => Ok(serde_json::to_string(&summary).unwrap_or_default()),
+        Err(AppError::Cancelled) => Ok(String::new()),
         Err(e) => Err(anyhow::anyhow!("Send failed: {}", e)),
     }
 }
@@ -149,6 +151,7 @@ pub fn start_receive(
     unregister_session(&session_token);
     match result {
         Ok(summary) => Ok(serde_json::to_string(&summary).unwrap_or_default()),
+        Err(AppError::Cancelled) => Ok(String::new()),
         Err(e) => Err(anyhow::anyhow!("Receive failed: {}", e)),
     }
 }
@@ -199,6 +202,7 @@ pub fn start_send_remote(
     unregister_session(&session_token);
     match result {
         Ok(summary) => Ok(serde_json::to_string(&summary).unwrap_or_default()),
+        Err(AppError::Cancelled) => Ok(String::new()),
         Err(e) => Err(anyhow::anyhow!("Send failed: {}", e)),
     }
 }
@@ -247,6 +251,7 @@ pub fn start_receive_remote(
     unregister_session(&session_token);
     match result {
         Ok(summary) => Ok(serde_json::to_string(&summary).unwrap_or_default()),
+        Err(AppError::Cancelled) => Ok(String::new()),
         Err(e) => Err(anyhow::anyhow!("Receive failed: {}", e)),
     }
 }

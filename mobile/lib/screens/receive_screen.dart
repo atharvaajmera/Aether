@@ -29,6 +29,8 @@ class ReceiveScreen extends StatefulWidget {
 
 class _ReceiveScreenState extends State<ReceiveScreen> {
   TransferMode _mode = TransferMode.local;
+  TransferUiPhase _phase = TransferUiPhase.idle;
+  bool _terminalEventReceived = false;
 
   bool _isListening = false;
   String _statusMessage = 'Tap radar to start receiving';
@@ -62,6 +64,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   String? _completedMode;
 
   void _handleLogEvent(dynamic log) {
+    if (_terminalEventReceived) return;
     final level = log['level'];
     if (level == 'Warn' || level == 'Error') {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -105,7 +108,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }
   }
 
-  void _stopReceiving({Object? lockToken}) {
+  void _stopReceiving({Object? lockToken, bool resetPhase = true}) {
     TransferLock.release(lockToken ?? _lockToken);
     _lockToken = null;
     final token = _sessionToken;
@@ -121,6 +124,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     setState(() {
       _isListening = false;
       _remoteStarted = false;
+      if (resetPhase) {
+        _phase = TransferUiPhase.idle;
+        _terminalEventReceived = false;
+      }
       _statusMessage = 'Tap radar to start receiving';
       _pin = null;
       _requirePinActive = false;
@@ -142,7 +149,11 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     final grantedStorage = await ReceiveStorage.ensurePermission();
     if (!grantedStorage) {
       if (mounted) {
-        setState(() => _statusMessage = 'Storage permission needed to save files');
+        setState(() {
+          _terminalEventReceived = true;
+          _phase = TransferUiPhase.failed;
+          _statusMessage = 'Storage permission needed to save files';
+        });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: const Text('Storage permission is required to save files to Download'),
           action: SnackBarAction(label: 'Settings', onPressed: () => openAppSettings()),
@@ -163,6 +174,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
     setState(() {
       _isListening = true;
+      _phase = TransferUiPhase.listening;
+      _terminalEventReceived = false;
       _requirePinActive = requirePin;
       _autoAcceptActive = autoAccept;
       _statusMessage = 'Listening for incoming files...';
@@ -214,29 +227,48 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }, onDone: () {
       TransferLock.release(lockToken);
       _lockToken = null;
-      if (mounted) setState(() => _isListening = false);
+      if (mounted) {
+        setState(() {
+          _isListening = false;
+          if (!_terminalEventReceived && !_phase.isTerminal) {
+            _phase = TransferUiPhase.idle;
+          }
+        });
+      }
     }, onError: (e) {
       TransferLock.release(lockToken);
       _lockToken = null;
-      setState(() {
-        _statusMessage = friendlyError(e);
-        _isListening = false;
-      });
+      if (mounted) {
+        if (_terminalEventReceived || _phase.isTerminal) {
+          return;
+        }
+        setState(() {
+          _terminalEventReceived = true;
+          _phase = TransferUiPhase.failed;
+          _statusMessage = friendlyError(e);
+          _isListening = false;
+        });
+      }
     });
   }
 
   void _handleTransferEvent(dynamic transEvent, String outputDir, Object? lockToken) {
     if (transEvent['StateChanged'] != null) {
+      if (_terminalEventReceived) return;
       final state = transEvent['StateChanged']['state'];
-      if (state == 'Closed') {
-        _stopReceiving(lockToken: lockToken);
-        setState(() => _statusMessage = 'Connection closed');
-      } else {
+      if (state != 'Closed') {
         setState(() {
-          _statusMessage = state == 'Connected' ? 'Connected to device...' : friendlyState(state, isReceive: true);
+          _statusMessage = friendlyState(state);
         });
       }
+    } else if (transEvent['ConnectionEstablished'] != null) {
+      if (_terminalEventReceived) return;
+      final mode = transEvent['ConnectionEstablished']['mode'];
+      setState(() {
+        _statusMessage = 'Connected via ${friendlyConnectionMode(mode)}';
+      });
     } else if (transEvent['IncomingRequest'] != null) {
+      if (_terminalEventReceived) return;
       final req = transEvent['IncomingRequest'];
       final fileName = req['file_name'] ?? 'Unknown file';
       final totalBytes = req['total_bytes'] ?? 0;
@@ -246,9 +278,13 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         // on a slow network.
         final sender = req['sender_name'] ?? req['peer'] ?? 'device';
         setState(() {
+          _phase = TransferUiPhase.connecting;
           _statusMessage = 'Accepting $fileName (${formatBytes(totalBytes)}) from $sender...';
         });
       } else {
+        setState(() {
+          _phase = TransferUiPhase.awaitingApproval;
+        });
         _showIncomingRequestDialog(
           fileName: fileName,
           totalBytes: totalBytes,
@@ -260,21 +296,39 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       TransferLock.release(lockToken);
       _lockToken = null;
       setState(() {
-        _statusMessage = 'Transfer cancelled';
+        _terminalEventReceived = true;
+        _phase = TransferUiPhase.cancelled;
+        _statusMessage = 'Sender cancelled the transfer';
         _progress = null;
+        _speedText = null;
+        _etaText = null;
+      });
+      _reArmTimer?.cancel();
+      _reArmTimer = Timer(const Duration(seconds: 2), () {
+        if (mounted && _phase == TransferUiPhase.cancelled) _reArmReceiving();
       });
     } else if (transEvent['Declined'] != null) {
       TransferLock.release(lockToken);
       _lockToken = null;
       final reason = transEvent['Declined']['reason'];
       setState(() {
+        _terminalEventReceived = true;
+        _phase = TransferUiPhase.failed;
         _statusMessage = reason == 'cancelled'
             ? 'Sender cancelled the transfer'
             : 'Transfer declined';
         _progress = null;
+        _speedText = null;
+        _etaText = null;
+      });
+      _reArmTimer?.cancel();
+      _reArmTimer = Timer(const Duration(seconds: 2), () {
+        if (mounted && _phase == TransferUiPhase.failed) _reArmReceiving();
       });
     } else if (transEvent['Started'] != null) {
+      if (_terminalEventReceived) return;
       setState(() {
+        _phase = TransferUiPhase.transferring;
         _statusMessage = 'Receiving ${transEvent['Started']['file_name']}...';
         _progress = 0.0;
         _totalBytes = transEvent['Started']['total_bytes'];
@@ -284,20 +338,26 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       });
     } else if (transEvent['Failed'] != null) {
       setState(() {
+        _terminalEventReceived = true;
+        _phase = TransferUiPhase.failed;
         _statusMessage = friendlyError(transEvent['Failed']['message']);
         _progress = null;
         _speedText = null;
         _etaText = null;
       });
     } else if (transEvent['Resumed'] != null) {
+      if (_terminalEventReceived) return;
       setState(() {
+        _phase = TransferUiPhase.transferring;
         final resumedBytes = transEvent['Resumed']['resumed_bytes'] ?? 0;
         final percent = _totalBytes != null && _totalBytes! > 0 ? (resumedBytes / _totalBytes! * 100).toStringAsFixed(1) : '0';
         _statusMessage = 'Resuming from $percent%...';
       });
     } else if (transEvent['Progress'] != null) {
+      if (_terminalEventReceived) return;
       final p = transEvent['Progress'];
       setState(() {
+        _phase = TransferUiPhase.transferring;
         _transferredBytes = p['transferred_bytes'];
         _totalBytes = p['total_bytes'];
         if (_totalBytes != null && _totalBytes! > 0) {
@@ -317,6 +377,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         }
       });
     } else if (transEvent['Completed'] != null) {
+      _terminalEventReceived = true;
       TransferLock.release(lockToken);
       _lockToken = null;
       final summary = transEvent['Completed'];
@@ -344,6 +405,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       }
 
       setState(() {
+        _phase = TransferUiPhase.succeeded;
         _statusMessage = statusMsg;
         _progress = 1.0;
         _savedFilePath = localPath;
@@ -361,7 +423,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       }
       _reArmTimer?.cancel();
       _reArmTimer = Timer(const Duration(seconds: 8), () {
-        if (mounted && _progress == 1.0) _reArmReceiving();
+        if (mounted && _phase == TransferUiPhase.succeeded) _reArmReceiving();
       });
     }
   }
@@ -371,7 +433,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     final savedLoc = _savedLocation;
     // Delete the app-dir copy now that the user has had time to Open/Share.
     _deleteAppDirCopyIfExported();
-    _stopReceiving();
+    _stopReceiving(resetPhase: false);
     setState(() {
       _savedFilePath = saved;
       _savedLocation = savedLoc;
@@ -461,6 +523,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
     setState(() {
       _statusMessage = 'Generating room code...';
+      _phase = TransferUiPhase.listening;
+      _terminalEventReceived = false;
       _roomCode = null;
       _progress = null;
     });
@@ -529,12 +593,24 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }, onDone: () {
       TransferLock.release(lockToken);
       _lockToken = null;
-      if (mounted) setState(() => _remoteStarted = false);
+      if (mounted) {
+        setState(() {
+          _remoteStarted = false;
+          if (!_terminalEventReceived && !_phase.isTerminal) {
+            _phase = TransferUiPhase.idle;
+          }
+        });
+      }
     }, onError: (e) {
       TransferLock.release(lockToken);
       _lockToken = null;
       if (mounted) {
+        if (_terminalEventReceived || _phase.isTerminal) {
+          return;
+        }
         setState(() {
+          _terminalEventReceived = true;
+          _phase = TransferUiPhase.failed;
           _statusMessage = friendlyError(e);
           _remoteStarted = false;
         });
