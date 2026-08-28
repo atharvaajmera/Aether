@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -12,6 +13,7 @@ import '../services/transfer_lock.dart';
 
 import '../utils/transfer_status.dart';
 import '../utils/formatters.dart';
+import '../utils/transfer_metrics.dart';
 import '../widgets/success_check.dart';
 import 'settings_screen.dart';
 
@@ -36,7 +38,8 @@ class _SendScreenState extends State<SendScreen> {
 
   int? _totalBytes;
   int? _transferredBytes;
-  DateTime? _transferStartTime;
+  int? _resumeBaselineBytes;
+  TransferMetricsState? _metrics;
   String? _speedText;
   String? _etaText;
 
@@ -107,7 +110,8 @@ class _SendScreenState extends State<SendScreen> {
       _progress = null;
       _totalBytes = null;
       _transferredBytes = null;
-      _transferStartTime = null;
+      _resumeBaselineBytes = null;
+      _metrics = null;
       _speedText = null;
       _etaText = null;
       _showSuccess = false;
@@ -115,7 +119,12 @@ class _SendScreenState extends State<SendScreen> {
       _completedPeerName = null;
       _completedDuration = null;
       _completedMode = null;
+      _sessionToken = null;
+      _isConnectingRemote = false;
+      _transferActive = false;
+      _currentTransferPeerName = null;
     });
+    _clearSelectedTemporaryFile();
   }
 
   Future<void> _clearSelectedTemporaryFile() async {
@@ -240,7 +249,6 @@ class _SendScreenState extends State<SendScreen> {
               _progress = null;
               _totalBytes = null;
               _transferredBytes = null;
-              _transferStartTime = null;
               _speedText = null;
               _etaText = null;
               _isConnectingRemote = false;
@@ -301,12 +309,22 @@ class _SendScreenState extends State<SendScreen> {
         });
       } else if (trans['Started'] != null) {
         if (_terminalEventReceived) return;
+        final started = trans['Started'];
+        final total = started['total_bytes'] as int? ?? 0;
+        final resumed = started['resumed_bytes'] as int? ?? 0;
         setState(() {
           _phase = TransferUiPhase.transferring;
-          _transferStatus = 'Sending ${trans['Started']['file_name']}...';
-          _progress = 0.0;
-          _totalBytes = trans['Started']['total_bytes'];
-          _transferStartTime = DateTime.now();
+          _transferStatus = resumed > 0
+              ? 'Resuming ${started['file_name']} from ${formatBytes(resumed)}...'
+              : 'Sending ${started['file_name']}...';
+          _resumeBaselineBytes = resumed;
+          _transferredBytes = resumed;
+          _totalBytes = total;
+          _metrics = TransferMetricsState.start(
+            totalBytes: total,
+            resumedBytes: resumed,
+          );
+          _progress = total > 0 ? (resumed / total).clamp(0.0, 1.0) : 0.0;
           _speedText = null;
           _etaText = null;
           _transferActive = true;
@@ -321,24 +339,23 @@ class _SendScreenState extends State<SendScreen> {
         });
       } else if (trans['Progress'] != null) {
         if (_terminalEventReceived) return;
+        final currentTransferred = trans['Progress']['transferred_bytes'] as int? ?? 0;
+        final total = trans['Progress']['total_bytes'] as int? ?? _totalBytes ?? 0;
         setState(() {
           _phase = TransferUiPhase.transferring;
-          _transferredBytes = trans['Progress']['transferred_bytes'];
-          _totalBytes = trans['Progress']['total_bytes'];
-          if (_totalBytes != null && _totalBytes! > 0) {
-            // Clamp: a duplicate/late Progress event can report more than total.
-            _progress = (_transferredBytes! / _totalBytes!).clamp(0.0, 1.0);
-          }
-
-          if (_transferStartTime != null && _transferredBytes != null && _totalBytes != null) {
-            final elapsed = DateTime.now().difference(_transferStartTime!);
-            if (elapsed.inSeconds > 0) {
-              final speedBps = _transferredBytes! / elapsed.inSeconds;
-              _speedText = '${formatBytes(speedBps.round())}/s';
-              final remainingBytes = _totalBytes! - _transferredBytes!;
-              final etaSeconds = speedBps > 0 ? remainingBytes / speedBps : 0;
-              _etaText = '${etaSeconds.round()}s left';
+          _transferredBytes = currentTransferred;
+          _totalBytes = total;
+          if (_metrics != null) {
+            final update = _metrics!.update(currentTransferred);
+            _progress = update.progressFraction;
+            if (update.speedBps != null) {
+              _speedText = '${formatBytes(update.speedBps!.round())}/s';
             }
+            _etaText = update.etaSeconds != null && update.etaSeconds! > 0
+                ? '${update.etaSeconds}s left'
+                : '';
+          } else if (_totalBytes != null && _totalBytes! > 0) {
+            _progress = (currentTransferred / _totalBytes!).clamp(0.0, 1.0);
           }
         });
       } else if (trans['Completed'] != null) {
@@ -351,10 +368,15 @@ class _SendScreenState extends State<SendScreen> {
             'Unknown device';
         final elapsedMs = summary['elapsed_ms'];
         final mode = formatTransferMode(summary['mode']);
+        final resumedBytes = summary['resumed_bytes'] as int? ?? _resumeBaselineBytes ?? 0;
+        final totalBytes = summary['total_bytes'] as int? ?? _selectedFileSize ?? 0;
+        final sessionBytes = max(0, totalBytes - resumedBytes);
         settings.addTransferHistory({
           'direction': 'send',
           'fileName': summary['file_name'] ?? _selectedFile?.split(RegExp(r'[\\/]')).last ?? 'Unknown file',
-          'size': summary['total_bytes'] ?? _selectedFileSize,
+          'size': totalBytes,
+          'resumedBytes': resumedBytes,
+          'sessionBytes': sessionBytes,
           'peerName': peerName,
           'durationMs': elapsedMs,
           'mode': summary['mode'],
@@ -363,7 +385,9 @@ class _SendScreenState extends State<SendScreen> {
         setState(() {
           _phase = TransferUiPhase.succeeded;
           _transferStatus = elapsedMs != null
-              ? 'Sent to $peerName in ${formatDuration(elapsedMs)}'
+              ? (resumedBytes > 0
+                  ? 'Sent to $peerName in ${formatDuration(elapsedMs)} (Resumed from ${formatBytes(resumedBytes)})'
+                  : 'Sent to $peerName in ${formatDuration(elapsedMs)}')
               : 'Sent to $peerName';
           _progress = 1.0;
           _showSuccess = true;
@@ -373,9 +397,10 @@ class _SendScreenState extends State<SendScreen> {
           _completedPeerName = peerName;
           _completedDuration = elapsedMs != null ? formatDuration(elapsedMs) : null;
           _completedMode = mode;
+          _metrics = null;
         });
         _autoResetTimer?.cancel();
-        _autoResetTimer = Timer(const Duration(seconds: 8), () {
+        _autoResetTimer = Timer(const Duration(seconds: 5), () {
           if (mounted && _phase == TransferUiPhase.succeeded) _resetTransferUi();
         });
       }

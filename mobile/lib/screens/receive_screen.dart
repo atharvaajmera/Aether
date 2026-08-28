@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:open_filex/open_filex.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:flutter/material.dart';
@@ -17,6 +18,7 @@ import '../services/settings_service.dart';
 
 import '../utils/transfer_status.dart';
 import '../utils/formatters.dart';
+import '../utils/transfer_metrics.dart';
 import '../widgets/success_check.dart';
 import 'settings_screen.dart';
 
@@ -51,7 +53,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
   int? _totalBytes;
   int? _transferredBytes;
-  DateTime? _transferStartTime;
+  int? _resumeBaselineBytes;
+  TransferMetricsState? _metrics;
   String? _speedText;
   String? _etaText;
   String? _savedFilePath;
@@ -135,7 +138,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       _progress = null;
       _totalBytes = null;
       _transferredBytes = null;
-      _transferStartTime = null;
+      _resumeBaselineBytes = null;
+      _metrics = null;
       _speedText = null;
       _etaText = null;
       _savedFilePath = null;
@@ -327,12 +331,22 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       });
     } else if (transEvent['Started'] != null) {
       if (_terminalEventReceived) return;
+      final started = transEvent['Started'];
+      final total = started['total_bytes'] as int? ?? 0;
+      final resumed = started['resumed_bytes'] as int? ?? 0;
       setState(() {
         _phase = TransferUiPhase.transferring;
-        _statusMessage = 'Receiving ${transEvent['Started']['file_name']}...';
-        _progress = 0.0;
-        _totalBytes = transEvent['Started']['total_bytes'];
-        _transferStartTime = DateTime.now();
+        _statusMessage = resumed > 0
+            ? 'Resuming ${started['file_name']} from ${formatBytes(resumed)}...'
+            : 'Receiving ${started['file_name']}...';
+        _resumeBaselineBytes = resumed;
+        _transferredBytes = resumed;
+        _totalBytes = total;
+        _metrics = TransferMetricsState.start(
+          totalBytes: total,
+          resumedBytes: resumed,
+        );
+        _progress = total > 0 ? (resumed / total).clamp(0.0, 1.0) : 0.0;
         _speedText = null;
         _etaText = null;
       });
@@ -344,6 +358,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         _progress = null;
         _speedText = null;
         _etaText = null;
+        _metrics = null;
       });
     } else if (transEvent['Resumed'] != null) {
       if (_terminalEventReceived) return;
@@ -356,24 +371,23 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     } else if (transEvent['Progress'] != null) {
       if (_terminalEventReceived) return;
       final p = transEvent['Progress'];
+      final currentTransferred = p['transferred_bytes'] as int? ?? 0;
+      final total = p['total_bytes'] as int? ?? _totalBytes ?? 0;
       setState(() {
         _phase = TransferUiPhase.transferring;
-        _transferredBytes = p['transferred_bytes'];
-        _totalBytes = p['total_bytes'];
-        if (_totalBytes != null && _totalBytes! > 0) {
-          // Clamp: a duplicate/late Progress event can report more than total.
-          _progress = (_transferredBytes! / _totalBytes!).clamp(0.0, 1.0);
-        }
-
-        if (_transferStartTime != null && _transferredBytes != null && _totalBytes != null) {
-          final elapsed = DateTime.now().difference(_transferStartTime!);
-          if (elapsed.inSeconds > 0) {
-            final speedBps = _transferredBytes! / elapsed.inSeconds;
-            _speedText = '${formatBytes(speedBps.round())}/s';
-            final remainingBytes = _totalBytes! - _transferredBytes!;
-            final etaSeconds = speedBps > 0 ? remainingBytes / speedBps : 0;
-            _etaText = '${etaSeconds.round()}s left';
+        _transferredBytes = currentTransferred;
+        _totalBytes = total;
+        if (_metrics != null) {
+          final update = _metrics!.update(currentTransferred);
+          _progress = update.progressFraction;
+          if (update.speedBps != null) {
+            _speedText = '${formatBytes(update.speedBps!.round())}/s';
           }
+          _etaText = update.etaSeconds != null && update.etaSeconds! > 0
+              ? '${update.etaSeconds}s left'
+              : '';
+        } else if (_totalBytes != null && _totalBytes! > 0) {
+          _progress = (currentTransferred / _totalBytes!).clamp(0.0, 1.0);
         }
       });
     } else if (transEvent['Completed'] != null) {
@@ -386,11 +400,16 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       final peerName = summary['peer_name'] ?? summary['peer'] ?? 'Unknown sender';
       final elapsedMs = summary['elapsed_ms'];
       final mode = formatTransferMode(summary['mode']);
+      final resumedBytes = summary['resumed_bytes'] as int? ?? _resumeBaselineBytes ?? 0;
+      final totalBytes = summary['total_bytes'] as int? ?? _totalBytes ?? 0;
+      final sessionBytes = max(0, totalBytes - resumedBytes);
       final settings = context.read<SettingsService>();
       settings.addTransferHistory({
         'direction': 'receive',
         'fileName': fileName ?? 'Unknown file',
-        'size': summary['total_bytes'] ?? _totalBytes,
+        'size': totalBytes,
+        'resumedBytes': resumedBytes,
+        'sessionBytes': sessionBytes,
         'peerName': peerName,
         'durationMs': elapsedMs,
         'mode': summary['mode'],
@@ -401,7 +420,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       // Build a rich status message with summary details.
       String statusMsg = 'Transfer complete!';
       if (elapsedMs != null) {
-        statusMsg = 'Received from $peerName in ${formatDuration(elapsedMs)}';
+        statusMsg = resumedBytes > 0
+            ? 'Received from $peerName in ${formatDuration(elapsedMs)} (Resumed from ${formatBytes(resumedBytes)})'
+            : 'Received from $peerName in ${formatDuration(elapsedMs)}';
       }
 
       setState(() {
@@ -413,32 +434,44 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         _completedPeerName = peerName;
         _completedDuration = elapsedMs != null ? formatDuration(elapsedMs) : null;
         _completedMode = mode;
+        _metrics = null;
       });
-      if (localPath != null) {
-        ReceiveStorage.exportToDownloads(localPath).then((saved) {
-          if (mounted && saved != null) {
-            setState(() => _savedLocation = saved);
+
+      void scheduleAutoReset() {
+        _reArmTimer?.cancel();
+        _reArmTimer = Timer(const Duration(seconds: 5), () {
+          if (mounted && _phase == TransferUiPhase.succeeded) {
+            _reArmReceiving();
           }
         });
       }
-      _reArmTimer?.cancel();
-      _reArmTimer = Timer(const Duration(seconds: 8), () {
-        if (mounted && _phase == TransferUiPhase.succeeded) _reArmReceiving();
-      });
+
+      if (localPath != null) {
+        ReceiveStorage.exportToDownloads(localPath).then((saved) {
+          if (mounted) {
+            if (saved != null) {
+              setState(() => _savedLocation = saved);
+            }
+            if (_phase == TransferUiPhase.succeeded) {
+              scheduleAutoReset();
+            }
+          }
+        }).catchError((_) {
+          if (mounted && _phase == TransferUiPhase.succeeded) {
+            scheduleAutoReset();
+          }
+        });
+      } else {
+        scheduleAutoReset();
+      }
     }
   }
 
   void _reArmReceiving() {
-    final saved = _savedFilePath;
-    final savedLoc = _savedLocation;
+    _reArmTimer?.cancel();
     // Delete the app-dir copy now that the user has had time to Open/Share.
     _deleteAppDirCopyIfExported();
-    _stopReceiving(resetPhase: false);
-    setState(() {
-      _savedFilePath = saved;
-      _savedLocation = savedLoc;
-      _progress = 1.0; // keep the saved-file card visible
-    });
+    _stopReceiving(resetPhase: true);
     if (_mode == TransferMode.local) {
       _startLocalReceiver();
     } else {
@@ -1043,14 +1076,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                         ],
                       ),
                       TextButton(
-                        onPressed: () {
-                          _stopReceiving();
-                          if (_mode == TransferMode.local) {
-                            _startLocalReceiver();
-                          } else {
-                            _setupRemoteReceiver();
-                          }
-                        },
+                        onPressed: _reArmReceiving,
                         style: TextButton.styleFrom(
                           visualDensity: VisualDensity.compact,
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,

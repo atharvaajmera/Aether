@@ -37,6 +37,8 @@ class TransferHistoryScreen extends StatelessWidget {
                 final durationMs = item['durationMs'];
                 final durationStr = durationMs is int ? formatDuration(durationMs) : '—';
                 final modeLabel = formatTransferMode(item['mode']);
+                final resumedBytes = item['resumedBytes'] is int ? item['resumedBytes'] as int : 0;
+                final resumedStr = resumedBytes > 0 ? ' (Resumed from ${formatBytes(resumedBytes)})' : '';
 
                 return ListTile(
                   leading: CircleAvatar(
@@ -52,7 +54,7 @@ class TransferHistoryScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '${isSend ? 'To' : 'From'} $peer • ${formatBytes(size)} • $durationStr',
+                        '${isSend ? 'To' : 'From'} $peer • ${formatBytes(size)} • $durationStr$resumedStr',
                         style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
                       ),
                       const SizedBox(height: 2),
