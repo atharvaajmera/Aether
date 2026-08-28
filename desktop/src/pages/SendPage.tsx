@@ -7,6 +7,7 @@ import { PlenumEventEnvelope, DiscoverRequest, DiscoverySummary, SendRequest, Se
 import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration, progressPercent } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
+import { createTransferMetrics, updateTransferMetrics, TransferMetricsState } from "../utils/transferMetrics";
 import { useSettings } from "../context/SettingsContext";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
@@ -23,8 +24,8 @@ const logToConsole = (log: LogEvent) => {
 };
 
 const STATE_LABELS: Record<string, string> = {
-  Discovering: "Searching for devices...",
-  Listening: "Ready to send files",
+  Discovering: "Searching...",
+  Listening: "Ready to receive files",
   Connecting: "Connecting to device...",
   SignalingConnected: "Connecting to device...",
   NegotiatingIce: "Establishing connection...",
@@ -54,7 +55,7 @@ const SendPage: React.FC = () => {
   const [etaText, setEtaText] = useState<string | null>(null);
   // Auto-reset timer so a late Completed can't race a fresh transfer's UI.
   const autoResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const transferStartRef = useRef<number | null>(null);
+  const metricsRef = useRef<TransferMetricsState | null>(null);
   const terminalEventRef = useRef(false);
   const activeSessionRef = useRef(0);
   const sessionFloorRef = useRef(0);
@@ -140,53 +141,53 @@ const SendPage: React.FC = () => {
                 setPhase("connecting");
                 setTransferStatus(friendlyState(trans.StateChanged.state));
               }
-           } else if ("Started" in trans) {
-              if (autoResetRef.current) clearTimeout(autoResetRef.current);
-              setPhase("transferring");
-              setSendSuccess(false);
-              setTransferStatus(trans.Started.resumed_bytes > 0
-                ? `Resuming ${trans.Started.file_name} from ${formatBytes(trans.Started.resumed_bytes)}...`
-                : `Sending ${trans.Started.file_name}...`);
-              setProgress({ transferred: trans.Started.resumed_bytes, total: trans.Started.total_bytes });
-              transferStartRef.current = Date.now();
-              setSpeedText(null);
-              setEtaText(null);
-              terminalEventRef.current = false;
-           } else if ("ConnectionEstablished" in trans) {
-              const connection = trans.ConnectionEstablished.mode === "Relay" ? "relay" : trans.ConnectionEstablished.mode === "Direct" ? "direct connection" : "local network";
-              setTransferStatus(`Connected via ${connection}`);
-           } else if ("AwaitingApproval" in trans) {
-              setPhase("awaitingApproval");
-              setTransferStatus("Waiting for receiver to accept...");
-           } else if ("Resumed" in trans) {
-              setPhase("transferring");
-              setTransferStatus(`Resuming transfer from ${formatBytes(trans.Resumed.resumed_bytes)}...`);
-              setProgress((current) => current ? { ...current, transferred: trans.Resumed.resumed_bytes } : current);
-           } else if ("Progress" in trans) {
-              setPhase("transferring");
-              setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
-              if (transferStartRef.current) {
-                const elapsed = (Date.now() - transferStartRef.current) / 1000;
-                if (elapsed > 0) {
-                  const speedBps = trans.Progress.transferred_bytes / elapsed;
-                  setSpeedText(`${formatBytes(Math.round(speedBps))}/s`);
-                  const remaining = trans.Progress.total_bytes - trans.Progress.transferred_bytes;
-                  const eta = speedBps > 0 ? Math.round(remaining / speedBps) : 0;
-                  setEtaText(eta > 0 ? `${eta}s left` : "");
-                }
-              }
-           } else if ("Declined" in trans) {
+            } else if ("Started" in trans) {
+               if (autoResetRef.current) clearTimeout(autoResetRef.current);
+               setPhase("transferring");
+               setSendSuccess(false);
+               setTransferStatus(trans.Started.resumed_bytes > 0
+                 ? `Resuming ${trans.Started.file_name} from ${formatBytes(trans.Started.resumed_bytes)}...`
+                 : `Sending ${trans.Started.file_name}...`);
+               metricsRef.current = createTransferMetrics(trans.Started.total_bytes, trans.Started.resumed_bytes);
+               setProgress({ transferred: trans.Started.resumed_bytes, total: trans.Started.total_bytes });
+               setSpeedText(null);
+               setEtaText(null);
+               terminalEventRef.current = false;
+            } else if ("ConnectionEstablished" in trans) {
+               const connection = trans.ConnectionEstablished.mode === "Relay" ? "relay" : trans.ConnectionEstablished.mode === "Direct" ? "direct connection" : "local network";
+               setTransferStatus(`Connected via ${connection}`);
+            } else if ("AwaitingApproval" in trans) {
+               setPhase("awaitingApproval");
+               setTransferStatus("Waiting for receiver to accept...");
+            } else if ("Resumed" in trans) {
+               setPhase("transferring");
+               setTransferStatus(`Resuming transfer from ${formatBytes(trans.Resumed.resumed_bytes)}...`);
+               setProgress((current) => current ? { ...current, transferred: trans.Resumed.resumed_bytes } : current);
+            } else if ("Progress" in trans) {
+               setPhase("transferring");
+               if (metricsRef.current) {
+                 const metrics = updateTransferMetrics(metricsRef.current, trans.Progress.transferred_bytes);
+                 setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
+                 if (metrics.speedBps != null) {
+                   setSpeedText(`${formatBytes(Math.round(metrics.speedBps))}/s`);
+                 }
+                 setEtaText(metrics.etaSeconds != null && metrics.etaSeconds > 0 ? `${metrics.etaSeconds}s left` : "");
+               } else {
+                 setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
+               }
+            } else if ("Declined" in trans) {
               terminalEventRef.current = true;
               setPhase("failed");
               setTransferStatus(trans.Declined.reason === "timeout" ? "Receiver did not respond" : "Receiver declined the transfer");
               setProgress(null);
               setSpeedText(null);
               setEtaText(null);
-              transferStartRef.current = null;
+              metricsRef.current = null;
               if (autoResetRef.current) clearTimeout(autoResetRef.current);
               autoResetRef.current = setTimeout(() => {
                 setPhase("idle");
                 setTransferStatus("");
+                terminalEventRef.current = false;
               }, 2000);
            } else if ("Failed" in trans) {
               terminalEventRef.current = true;
@@ -195,7 +196,7 @@ const SendPage: React.FC = () => {
               setProgress(null);
               setSpeedText(null);
               setEtaText(null);
-              transferStartRef.current = null;
+              metricsRef.current = null;
            } else if ("Cancelled" in trans) {
               terminalEventRef.current = true;
               setPhase("cancelled");
@@ -203,42 +204,50 @@ const SendPage: React.FC = () => {
               setProgress(null);
               setSpeedText(null);
               setEtaText(null);
-              transferStartRef.current = null;
+              metricsRef.current = null;
               if (autoResetRef.current) clearTimeout(autoResetRef.current);
               autoResetRef.current = setTimeout(() => {
                 setPhase("idle");
                 setTransferStatus("");
+                terminalEventRef.current = false;
               }, 2000);
            } else if ("Completed" in trans) {
              terminalEventRef.current = true;
              setPhase("succeeded");
              const summary: TransferSummary = trans.Completed;
              const peerLabel = summary.peer_name ?? summary.peer ?? "device";
+             const resumedBytes = summary.resumed_bytes ?? 0;
+             const sessionBytes = Math.max(0, summary.total_bytes - resumedBytes);
              addHistoryEntry({
                direction: "send",
                fileName: summary.file_name,
                size: summary.total_bytes,
+               resumedBytes,
+               sessionBytes,
                peerName: peerLabel,
                durationMs: summary.elapsed_ms,
                mode: summary.mode,
                timestamp: new Date().toISOString(),
              });
              setSendSuccess(true);
-              setTransferStatus(
-                summary.elapsed_ms != null
-                  ? `Sent to ${peerLabel} in ${formatDuration(summary.elapsed_ms)}`
-                  : `Sent ${summary.file_name} successfully!`
-              );
-              setProgress(null);
-              setSpeedText(null);
-              setEtaText(null);
-              transferStartRef.current = null;
+             setTransferStatus(
+               summary.elapsed_ms != null
+                 ? (resumedBytes > 0
+                     ? `Sent to ${peerLabel} in ${formatDuration(summary.elapsed_ms)} (Resumed from ${formatBytes(resumedBytes)})`
+                     : `Sent to ${peerLabel} in ${formatDuration(summary.elapsed_ms)}`)
+                 : `Sent ${summary.file_name} successfully!`
+             );
+             setProgress(null);
+             setSpeedText(null);
+             setEtaText(null);
+             metricsRef.current = null;
              if (autoResetRef.current) clearTimeout(autoResetRef.current);
              autoResetRef.current = setTimeout(() => {
                setPhase("idle");
                setSendSuccess(false);
                setTransferStatus("");
-             }, 4000);
+               terminalEventRef.current = false;
+             }, 5000);
             }
          } else if ("Log" in payload) {
            if (!terminalEventRef.current) {
@@ -410,18 +419,26 @@ const SendPage: React.FC = () => {
       }
     }
     abandonSession(activeSessionRef, sessionFloorRef);
-    if (autoResetRef.current) clearTimeout(autoResetRef.current);
+    resetSendUi();
+    setMode(nextMode);
+  };
+
+  const resetSendUi = () => {
+    if (autoResetRef.current) {
+      clearTimeout(autoResetRef.current);
+      autoResetRef.current = null;
+    }
     setPhase("idle");
-    setIsTransferActive(false);
-    setIsConnectingRemote(false);
-    setPinInputPeer(null);
+    setSendSuccess(false);
+    setTransferStatus("");
     setProgress(null);
     setSpeedText(null);
     setEtaText(null);
-    setSendSuccess(false);
-    setTransferStatus("");
-    transferStartRef.current = null;
-    setMode(nextMode);
+    setIsTransferActive(false);
+    setIsConnectingRemote(false);
+    setPinInputPeer(null);
+    metricsRef.current = null;
+    terminalEventRef.current = false;
   };
 
   const handleCancelTransfer = async () => {

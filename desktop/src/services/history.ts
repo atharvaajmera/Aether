@@ -10,6 +10,8 @@ export interface HistoryEntry {
   mode?: TransferMode;
   /** Local path of the received file (receive entries only). */
   path?: string;
+  resumedBytes?: number;
+  sessionBytes?: number;
   timestamp: string; // ISO-8601
 }
 
@@ -27,6 +29,8 @@ function isValidEntry(value: unknown): value is HistoryEntry {
   if (e.durationMs !== undefined && typeof e.durationMs !== "number") return false;
   if (e.mode !== undefined && typeof e.mode !== "string") return false;
   if (e.path !== undefined && typeof e.path !== "string") return false;
+  if (e.resumedBytes !== undefined && typeof e.resumedBytes !== "number") return false;
+  if (e.sessionBytes !== undefined && typeof e.sessionBytes !== "number") return false;
   return true;
 }
 

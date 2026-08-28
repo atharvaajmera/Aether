@@ -9,6 +9,7 @@ import { useSettings } from "../context/SettingsContext";
 import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration, progressPercent } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
+import { createTransferMetrics, updateTransferMetrics, TransferMetricsState } from "../utils/transferMetrics";
 import TransferAcceptDialog, { IncomingTransfer } from "../components/TransferAcceptDialog";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
@@ -48,7 +49,8 @@ const ReceivePage: React.FC = () => {
   const [etaText, setEtaText] = useState<string | null>(null);
   const [technicalDetails, setTechnicalDetails] = useState<string | null>(null);
   const [transferFailed, setTransferFailed] = useState(false);
-  const transferStartRef = useRef<number | null>(null);
+  const successResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const metricsRef = useRef<TransferMetricsState | null>(null);
   const terminalEventRef = useRef(false);
   const activeSessionRef = useRef(0);
   const sessionFloorRef = useRef(0);
@@ -105,8 +107,27 @@ const ReceivePage: React.FC = () => {
     }
   };
 
+  const resetReceiveUi = () => {
+    if (successResetRef.current) {
+      clearTimeout(successResetRef.current);
+      successResetRef.current = null;
+    }
+    setSavedPath(null);
+    setProgress(null);
+    setSpeedText(null);
+    setEtaText(null);
+    setPhase("listening");
+    setStatus("Ready to receive files");
+    terminalEventRef.current = false;
+    metricsRef.current = null;
+  };
+
   const handleModeChange = async (nextMode: "local" | "internet") => {
     if (nextMode === mode) return;
+    if (successResetRef.current) {
+      clearTimeout(successResetRef.current);
+      successResetRef.current = null;
+    }
     setStatus("Switching receiver mode...");
     setPhase("idle");
     try {
@@ -136,20 +157,14 @@ const ReceivePage: React.FC = () => {
     } else if ("IncomingRequest" in trans) {
       const req = trans.IncomingRequest;
       if (!settingsRef.current.receive.autoAccept) {
-        setPhase("awaitingApproval");
         setIncoming({
           fileName: req.file_name,
           totalBytes: req.total_bytes,
+          senderName: req.sender_name ?? req.peer ?? "Unknown device",
           peer: req.peer,
-          senderName: req.sender_name,
         });
-        setStatus("Incoming file — waiting for your decision");
-      } else {
-        // Auto-accept skips the dialog. Surface the file/sender explicitly so the
-        // user has confirmation of what was accepted even if negotiation stalls.
-        setPhase("connecting");
-        const sender = req.sender_name ?? req.peer ?? "device";
-        setStatus(`Accepting ${req.file_name} (${formatBytes(req.total_bytes)}) from ${sender}...`);
+        setPhase("awaitingApproval");
+        setStatus(`Incoming file: ${req.file_name} from ${req.sender_name ?? req.peer ?? "device"}`);
       }
     } else if ("ConnectionEstablished" in trans) {
       const connection = trans.ConnectionEstablished.mode === "Relay" ? "relay" : trans.ConnectionEstablished.mode === "Direct" ? "direct connection" : "local network";
@@ -162,7 +177,7 @@ const ReceivePage: React.FC = () => {
       setProgress(null);
       setSpeedText(null);
       setEtaText(null);
-      transferStartRef.current = null;
+      metricsRef.current = null;
     } else if ("Declined" in trans) {
       terminalEventRef.current = true;
       setPhase("failed");
@@ -171,7 +186,7 @@ const ReceivePage: React.FC = () => {
       setProgress(null);
       setSpeedText(null);
       setEtaText(null);
-      transferStartRef.current = null;
+      metricsRef.current = null;
     } else if ("Failed" in trans) {
       terminalEventRef.current = true;
       setPhase("failed");
@@ -180,8 +195,12 @@ const ReceivePage: React.FC = () => {
       setProgress(null);
       setSpeedText(null);
       setEtaText(null);
-      transferStartRef.current = null;
+      metricsRef.current = null;
     } else if ("Started" in trans) {
+      if (successResetRef.current) {
+        clearTimeout(successResetRef.current);
+        successResetRef.current = null;
+      }
       terminalEventRef.current = false;
       setPhase("transferring");
       setTransferFailed(false);
@@ -191,8 +210,8 @@ const ReceivePage: React.FC = () => {
       setStatus(trans.Started.resumed_bytes > 0
         ? `Resuming ${trans.Started.file_name} from ${formatBytes(trans.Started.resumed_bytes)}...`
         : `Receiving ${trans.Started.file_name}...`);
+      metricsRef.current = createTransferMetrics(trans.Started.total_bytes, trans.Started.resumed_bytes);
       setProgress({ transferred: trans.Started.resumed_bytes, total: trans.Started.total_bytes });
-      transferStartRef.current = Date.now();
       setSpeedText(null);
       setEtaText(null);
     } else if ("Resumed" in trans) {
@@ -201,16 +220,15 @@ const ReceivePage: React.FC = () => {
       setProgress((current) => current ? { ...current, transferred: trans.Resumed.resumed_bytes } : current);
     } else if ("Progress" in trans) {
       setPhase("transferring");
-      setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
-      if (transferStartRef.current) {
-        const elapsed = (Date.now() - transferStartRef.current) / 1000;
-        if (elapsed > 0) {
-          const speedBps = trans.Progress.transferred_bytes / elapsed;
-          setSpeedText(`${formatBytes(Math.round(speedBps))}/s`);
-          const remaining = trans.Progress.total_bytes - trans.Progress.transferred_bytes;
-          const eta = speedBps > 0 ? Math.round(remaining / speedBps) : 0;
-          setEtaText(eta > 0 ? `${eta}s left` : "");
+      if (metricsRef.current) {
+        const metrics = updateTransferMetrics(metricsRef.current, trans.Progress.transferred_bytes);
+        setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
+        if (metrics.speedBps != null) {
+          setSpeedText(`${formatBytes(Math.round(metrics.speedBps))}/s`);
         }
+        setEtaText(metrics.etaSeconds != null && metrics.etaSeconds > 0 ? `${metrics.etaSeconds}s left` : "");
+      } else {
+        setProgress({ transferred: trans.Progress.transferred_bytes, total: trans.Progress.total_bytes });
       }
     } else if ("Completed" in trans) {
       terminalEventRef.current = true;
@@ -218,6 +236,8 @@ const ReceivePage: React.FC = () => {
       setTransferFailed(false);
       setTechnicalDetails(null);
       const summary: TransferSummary = trans.Completed;
+      const resumedBytes = summary.resumed_bytes ?? 0;
+      const sessionBytes = Math.max(0, summary.total_bytes - resumedBytes);
       const path = outputDirRef.current
         ? `${outputDirRef.current}${outputDirRef.current.endsWith("\\") || outputDirRef.current.endsWith("/") ? "" : "\\"}${summary.file_name}`
         : null;
@@ -225,6 +245,8 @@ const ReceivePage: React.FC = () => {
         direction: "receive",
         fileName: summary.file_name,
         size: summary.total_bytes,
+        resumedBytes,
+        sessionBytes,
         peerName: summary.peer_name ?? summary.peer ?? "Unknown sender",
         durationMs: summary.elapsed_ms,
         mode: summary.mode,
@@ -233,14 +255,20 @@ const ReceivePage: React.FC = () => {
       });
       setStatus(
         summary.elapsed_ms != null
-          ? `Received ${summary.file_name} in ${formatDuration(summary.elapsed_ms)}`
+          ? (resumedBytes > 0
+              ? `Received ${summary.file_name} in ${formatDuration(summary.elapsed_ms)} (Resumed from ${formatBytes(resumedBytes)})`
+              : `Received ${summary.file_name} in ${formatDuration(summary.elapsed_ms)}`)
           : `Received ${summary.file_name} successfully!`
       );
       setSavedPath(path);
       setProgress(null);
       setSpeedText(null);
       setEtaText(null);
-      transferStartRef.current = null;
+      metricsRef.current = null;
+      if (successResetRef.current) clearTimeout(successResetRef.current);
+      successResetRef.current = setTimeout(() => {
+        resetReceiveUi();
+      }, 5000);
     }
   };
 
@@ -338,6 +366,7 @@ const ReceivePage: React.FC = () => {
 
     return () => {
       cancelled = true;
+      if (successResetRef.current) clearTimeout(successResetRef.current);
       // Abandon this session so a trailing event with same id can't hit the next mode.
       abandonSession(activeSessionRef, sessionFloorRef);
       if (unlisten) unlisten();
@@ -426,6 +455,7 @@ const ReceivePage: React.FC = () => {
 
     return () => {
       cancelled = true;
+      if (successResetRef.current) clearTimeout(successResetRef.current);
       // Abandon this session so a trailing event with same id can't hit the next mode.
       abandonSession(activeSessionRef, sessionFloorRef);
       if (unlisten) unlisten();
@@ -434,6 +464,7 @@ const ReceivePage: React.FC = () => {
   }, [mode]);
 
   useEffect(() => () => {
+    if (successResetRef.current) clearTimeout(successResetRef.current);
     invoke("cancel_session_command", { sessionId: activeSessionRef.current }).catch(console.error);
   }, []);
 
@@ -543,13 +574,21 @@ const ReceivePage: React.FC = () => {
                 Saved to {savedPath}
               </div>
             </div>
-            <button
-              onClick={handleOpenFolder}
-              style={{ display: "flex", alignItems: "center", gap: "6px", padding: "8px 16px", borderRadius: "8px", border: "none", backgroundColor: "var(--accent-primary)", color: "white", fontWeight: 600, cursor: "pointer", fontSize: "13px" }}
-            >
-              <FolderOpen size={16} />
-              Open folder
-            </button>
+            <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+              <button
+                onClick={handleOpenFolder}
+                style={{ display: "flex", alignItems: "center", gap: "6px", padding: "8px 16px", borderRadius: "8px", border: "none", backgroundColor: "var(--accent-primary)", color: "white", fontWeight: 600, cursor: "pointer", fontSize: "13px" }}
+              >
+                <FolderOpen size={16} />
+                Open folder
+              </button>
+              <button
+                onClick={resetReceiveUi}
+                style={{ display: "flex", alignItems: "center", gap: "6px", padding: "8px 16px", borderRadius: "8px", border: "1px solid var(--border-color)", backgroundColor: "transparent", color: "var(--text-secondary)", fontWeight: 500, cursor: "pointer", fontSize: "13px" }}
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
         )}
       </div>

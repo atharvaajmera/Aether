@@ -81,6 +81,7 @@ const HistoryPage: React.FC = () => {
                   <span style={{ color: "var(--text-primary)", fontWeight: 500, wordBreak: "break-all" }}>{e.fileName}</span>
                   <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
                     {isSend ? "To" : "From"} {e.peerName} • {formatBytes(e.size)} • {durationStr}
+                    {e.resumedBytes && e.resumedBytes > 0 ? ` (Resumed from ${formatBytes(e.resumedBytes)})` : ""}
                   </span>
                   <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                     <span style={{ fontSize: "10px", fontWeight: 600, color: "var(--accent-primary)", padding: "2px 8px", borderRadius: "10px", backgroundColor: "color-mix(in srgb, var(--accent-primary) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--accent-primary) 35%, transparent)" }}>
