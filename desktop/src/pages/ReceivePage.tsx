@@ -178,6 +178,10 @@ const ReceivePage: React.FC = () => {
       setSpeedText(null);
       setEtaText(null);
       metricsRef.current = null;
+      if (successResetRef.current) clearTimeout(successResetRef.current);
+      successResetRef.current = setTimeout(() => {
+        resetReceiveUi();
+      }, 2000);
     } else if ("Declined" in trans) {
       terminalEventRef.current = true;
       setPhase("failed");
@@ -187,6 +191,10 @@ const ReceivePage: React.FC = () => {
       setSpeedText(null);
       setEtaText(null);
       metricsRef.current = null;
+      if (successResetRef.current) clearTimeout(successResetRef.current);
+      successResetRef.current = setTimeout(() => {
+        resetReceiveUi();
+      }, 2000);
     } else if ("Failed" in trans) {
       terminalEventRef.current = true;
       setPhase("failed");
