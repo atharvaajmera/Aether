@@ -1586,6 +1586,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     let mut file_size = 0u64;
     let mut sender_name: Option<String> = None;
     let mut bytes_received = 0u64;
+    let mut resumed_bytes_at_start = 0u64;
     let mut checkpoint: Option<ResumeCheckpoint> = None;
     let mut checkpoint_path: Option<PathBuf> = None;
     let mut peak_receiver_buffered = 0usize;
@@ -1766,6 +1767,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                         file_size,
                         options.chunk_size,
                     ));
+                resumed_bytes_at_start = resume_bytes;
 
                 file = Some(BufWriter::with_capacity(1024 * 1024, open_file));
                 checkpoint = Some(cp);
@@ -2120,11 +2122,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
         mode,
         total_bytes: file_size,
         transferred_bytes: bytes_received,
-        resumed_bytes: checkpoint
-            .as_ref()
-            .map(|cp| cp.bytes_written)
-            .unwrap_or(0)
-            .min(bytes_received),
+        resumed_bytes: resumed_bytes_at_start.min(bytes_received),
         elapsed_ms: started_at.elapsed().as_millis(),
     };
     let _ = peak_receiver_buffered;
