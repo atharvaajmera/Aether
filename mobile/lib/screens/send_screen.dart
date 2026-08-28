@@ -225,15 +225,10 @@ class _SendScreenState extends State<SendScreen> {
     if (!mounted) return;
     final event = jsonDecode(eventJson);
     if (event['Log'] != null) {
-      if (_terminalEventReceived) return;
       final log = event['Log'];
-      final level = log['level'];
-      if (level == 'Warn' || level == 'Error') {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(friendlyLogMessage(level, log['message'])),
-          backgroundColor: level == 'Error' ? Colors.redAccent : Colors.orange,
-        ));
-      }
+      final level = log['level'] ?? 'Info';
+      final message = log['message'] ?? '';
+      debugPrint('[$level] $message');
       return;
     }
     if (event['Transfer'] != null) {

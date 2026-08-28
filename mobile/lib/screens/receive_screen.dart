@@ -67,14 +67,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   String? _completedMode;
 
   void _handleLogEvent(dynamic log) {
-    if (_terminalEventReceived) return;
-    final level = log['level'];
-    if (level == 'Warn' || level == 'Error') {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(friendlyLogMessage(level, log['message'])),
-        backgroundColor: level == 'Error' ? Colors.redAccent : Colors.orange,
-      ));
-    }
+    final level = log['level'] ?? 'Info';
+    final message = log['message'] ?? '';
+    debugPrint('[$level] $message');
   }
 
   @override
