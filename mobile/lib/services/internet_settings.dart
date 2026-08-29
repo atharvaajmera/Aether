@@ -37,6 +37,43 @@ class IceServerSetting {
   };
 }
 
+enum RoomLookupStatus {
+  exists,
+  notFound,
+  relayUnavailable,
+  invalidRelayUrl,
+}
+
+class RoomLookupResult {
+  final RoomLookupStatus status;
+  final int? statusCode;
+  final Object? error;
+
+  const RoomLookupResult({
+    required this.status,
+    this.statusCode,
+    this.error,
+  });
+
+  bool get exists => status == RoomLookupStatus.exists;
+
+  String get userMessage {
+    switch (status) {
+      case RoomLookupStatus.exists:
+        return '';
+      case RoomLookupStatus.notFound:
+        return 'Room not found. Check the code or ask the receiver to create a new room.';
+      case RoomLookupStatus.relayUnavailable:
+        if (statusCode != null && statusCode! >= 500) {
+          return 'The Plenum relay is temporarily unavailable. Try again shortly.';
+        }
+        return 'Couldn\'t reach the Plenum relay. Check your internet connection and try again.';
+      case RoomLookupStatus.invalidRelayUrl:
+        return 'Internet transfer is not configured correctly.';
+    }
+  }
+}
+
 const _relayServerUrlKey = 'internet.relay_server_url';
 const _iceServersKey = 'internet.ice_servers';
 
@@ -109,9 +146,9 @@ class InternetSettings {
     );
   }
 
-  // Get the room code from the HTTPS endpoint from a `wss://.../ws`
-  // relay signaling URL.
-  static Uri? _roomUri(String relayServerUrl, String roomCode) {
+  /// Get the canonical HTTP/HTTPS room status URI from a relay URL (e.g. `wss://.../ws`)
+  /// and room code.
+  static Uri? roomStatusUri(String relayServerUrl, String roomCode) {
     final trimmed = relayServerUrl.trim();
     if (trimmed.isEmpty) return null;
     Uri parsed;
@@ -125,19 +162,157 @@ class InternetSettings {
       'ws' || 'http' => 'http',
       _ => 'https',
     };
-    return parsed.replace(
+    return Uri(
       scheme: httpsScheme,
-      path: '/room/$roomCode',
+      userInfo: parsed.userInfo.isNotEmpty ? parsed.userInfo : null,
+      host: parsed.host,
+      port: parsed.hasPort ? parsed.port : null,
+      path: '/room/${Uri.encodeComponent(roomCode)}',
     );
+  }
+
+  /// Looks up whether an active room exists on the relay and returns a typed
+  /// [RoomLookupResult] distinguishing 204 (exists), 404 (not found), 5xx / timeout
+  /// (relay unavailable), or invalid URL configuration.
+  static Future<RoomLookupResult> lookupRoom(
+    String relayServerUrl,
+    String roomCode, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final uri = roomStatusUri(relayServerUrl, roomCode);
+    if (uri == null) {
+      return const RoomLookupResult(status: RoomLookupStatus.invalidRelayUrl);
+    }
+    try {
+      final resp = await http.get(uri).timeout(timeout);
+      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+        return RoomLookupResult(
+          status: RoomLookupStatus.exists,
+          statusCode: resp.statusCode,
+        );
+      }
+      if (resp.statusCode == 404) {
+        return const RoomLookupResult(
+          status: RoomLookupStatus.notFound,
+          statusCode: 404,
+        );
+      }
+      return RoomLookupResult(
+        status: RoomLookupStatus.relayUnavailable,
+        statusCode: resp.statusCode,
+      );
+    } catch (e) {
+      return RoomLookupResult(
+        status: RoomLookupStatus.relayUnavailable,
+        error: e,
+      );
+    }
   }
 
   // Returns whether the relay currently has an open room for [roomCode].
   // Hits the relay's `GET /room/{code}` endpoint (204 = exists, 404 = gone).
   static Future<bool> roomExists(String relayServerUrl, String roomCode) async {
-    final uri = _roomUri(relayServerUrl, roomCode);
-    if (uri == null) return false;
-    final resp = await http.get(uri).timeout(const Duration(seconds: 8));
-    return resp.statusCode >= 200 && resp.statusCode < 300;
+    final result = await lookupRoom(relayServerUrl, roomCode);
+    return result.exists;
+  }
+
+  /// Polls the relay status endpoint until the room exists or timeout expires.
+  /// Uses an immediate initial check followed by bounded backoff (200ms -> 1000ms).
+  static Future<RoomLookupResult> waitForRoomRegistration(
+    String relayServerUrl,
+    String roomCode, {
+    Duration timeout = const Duration(seconds: 10),
+    bool Function()? isCancelled,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    var delayMs = 200;
+    RoomLookupResult lastResult = const RoomLookupResult(
+      status: RoomLookupStatus.notFound,
+      statusCode: 404,
+    );
+
+    while (stopwatch.elapsed < timeout) {
+      if (isCancelled?.call() == true) {
+        return lastResult;
+      }
+
+      final remaining = timeout - stopwatch.elapsed;
+      lastResult = await lookupRoom(
+        relayServerUrl,
+        roomCode,
+        timeout: remaining > const Duration(seconds: 2)
+            ? const Duration(seconds: 2)
+            : (remaining > Duration.zero ? remaining : const Duration(milliseconds: 100)),
+      );
+
+      if (lastResult.exists) {
+        return lastResult;
+      }
+
+      if (isCancelled?.call() == true) {
+        return lastResult;
+      }
+
+      final remainingAfterLookup = timeout - stopwatch.elapsed;
+      if (remainingAfterLookup <= Duration.zero) break;
+
+      final sleepMs = delayMs.clamp(0, remainingAfterLookup.inMilliseconds);
+      await Future.delayed(Duration(milliseconds: sleepMs));
+      delayMs = (delayMs + 200).clamp(200, 1000);
+    }
+
+    return lastResult;
+  }
+
+  /// Looks up whether an active room exists on the relay, retrying `404` across
+  /// a short grace period (default: 4 seconds) to tolerate registration propagation races.
+  static Future<RoomLookupResult> lookupRoomWithGracePeriod(
+    String relayServerUrl,
+    String roomCode, {
+    Duration timeout = const Duration(seconds: 4),
+    Duration pollInterval = const Duration(milliseconds: 500),
+    bool Function()? isCancelled,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    RoomLookupResult lastResult = const RoomLookupResult(
+      status: RoomLookupStatus.notFound,
+      statusCode: 404,
+    );
+
+    while (stopwatch.elapsed < timeout) {
+      if (isCancelled?.call() == true) {
+        return lastResult;
+      }
+
+      final remaining = timeout - stopwatch.elapsed;
+      lastResult = await lookupRoom(
+        relayServerUrl,
+        roomCode,
+        timeout: remaining > const Duration(seconds: 2)
+            ? const Duration(seconds: 2)
+            : (remaining > Duration.zero ? remaining : const Duration(milliseconds: 100)),
+      );
+
+      if (lastResult.exists) {
+        return lastResult;
+      }
+
+      if (lastResult.status == RoomLookupStatus.invalidRelayUrl) {
+        return lastResult;
+      }
+
+      if (isCancelled?.call() == true) {
+        return lastResult;
+      }
+
+      final remainingAfterLookup = timeout - stopwatch.elapsed;
+      if (remainingAfterLookup <= Duration.zero) break;
+
+      final sleepMs = pollInterval.inMilliseconds.clamp(0, remainingAfterLookup.inMilliseconds);
+      await Future.delayed(Duration(milliseconds: sleepMs));
+    }
+
+    return lastResult;
   }
 
   /// Builds the full `ice_servers_json` FFI payload for a transfer: the

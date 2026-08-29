@@ -503,23 +503,34 @@ class _SendScreenState extends State<SendScreen> {
     setState(() {
       _phase = TransferUiPhase.connecting;
       _terminalEventReceived = false;
-      _transferStatus = 'Connecting to relay...';
+      _transferStatus = 'Finding room…';
       _isConnectingRemote = true;
     });
 
     Object? lockToken;
     try {
-      final exists = await InternetSettings.roomExists(relayServerUrl, roomCode);
-      if (!exists) {
+      final lookup = await InternetSettings.lookupRoomWithGracePeriod(
+        relayServerUrl,
+        roomCode,
+        timeout: const Duration(seconds: 4),
+        isCancelled: () => !mounted || _phase.isTerminal,
+      );
+      if (!lookup.exists) {
         if (mounted) {
           setState(() {
             _terminalEventReceived = true;
             _phase = TransferUiPhase.failed;
-            _transferStatus = 'Room not found. Ask the receiver to open Internet mode and share a new room code.';
+            _transferStatus = lookup.userMessage;
             _isConnectingRemote = false;
           });
         }
         return;
+      }
+
+      if (mounted) {
+        setState(() {
+          _transferStatus = 'Room found. Connecting…';
+        });
       }
 
       final myPeerId = generatePeerIdSync();
@@ -951,7 +962,7 @@ class _SendScreenState extends State<SendScreen> {
               ),
               const SizedBox(width: 8),
               ElevatedButton(
-                onPressed: _isConnectingRemote ? null : _handleRoomCodeConnect,
+                onPressed: (_isConnectingRemote || _transferActive) ? null : _handleRoomCodeConnect,
                 child: const Text('Connect'),
               ),
             ],

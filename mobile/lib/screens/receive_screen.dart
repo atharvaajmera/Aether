@@ -536,6 +536,17 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     if (_remoteStarted) return;
     _remoteStarted = true;
 
+    final settings = context.read<SettingsService>();
+    final relayServerUrl = settings.relayServerUrl;
+    final autoAccept = settings.autoAccept;
+    _autoAcceptActive = autoAccept;
+    final iceServers = settings.iceServers
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .map((e) => IceServerSetting(urls: e))
+        .toList();
+
     final granted = await ReceiveStorage.ensurePermission();
     if (!granted) {
       if (mounted) {
@@ -548,33 +559,19 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       _remoteStarted = false;
       return;
     }
+    if (!mounted) return;
 
     setState(() {
-      _statusMessage = 'Generating room code...';
-      _phase = TransferUiPhase.listening;
+      _phase = TransferUiPhase.connecting;
+      _statusMessage = 'Creating secure room...';
       _terminalEventReceived = false;
       _roomCode = null;
       _progress = null;
+      _remoteStarted = true;
     });
 
     final code = generateRoomCodeSync();
     final myPeerId = generatePeerIdSync();
-
-    if (!mounted) return;
-    setState(() => _roomCode = code);
-
-    final settings = context.read<SettingsService>();
-    final relayServerUrl = settings.relayServerUrl;
-    final autoAccept = settings.autoAccept;
-    _autoAcceptActive = autoAccept;
-    final iceServers = settings.iceServers
-        .split('\n')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .map((e) => IceServerSetting(urls: e))
-        .toList();
-
-    if (mounted) setState(() => _statusMessage = 'Waiting for sender...');
 
     final outputDir = await ReceiveStorage.outputDir();
     final iceServersJson = await InternetSettings.buildIceServersJsonWithTurn(
@@ -582,6 +579,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       myPeerId,
       iceServers,
     );
+
+    if (!mounted || _mode != TransferMode.internet) return;
 
     Object? lockToken;
     try {
@@ -633,16 +632,48 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       TransferLock.release(lockToken);
       _lockToken = null;
       if (mounted) {
-        if (_terminalEventReceived || _phase.isTerminal) {
-          return;
-        }
+        if (_terminalEventReceived) return;
         setState(() {
           _terminalEventReceived = true;
           _phase = TransferUiPhase.failed;
-          _statusMessage = friendlyError(e);
           _remoteStarted = false;
+          _statusMessage = friendlyError(e);
         });
       }
+    });
+
+    final regResult = await InternetSettings.waitForRoomRegistration(
+      relayServerUrl,
+      code,
+      timeout: const Duration(seconds: 10),
+      isCancelled: () => !mounted || _sessionToken != sessionToken || _mode != TransferMode.internet,
+    );
+
+    if (!mounted || _sessionToken != sessionToken || _mode != TransferMode.internet) {
+      return;
+    }
+
+    if (!regResult.exists) {
+      cancelSession(sessionToken: sessionToken);
+      TransferLock.release(lockToken);
+      _lockToken = null;
+      if (mounted) {
+        setState(() {
+          _terminalEventReceived = true;
+          _phase = TransferUiPhase.failed;
+          _remoteStarted = false;
+          _statusMessage = regResult.userMessage.isNotEmpty
+              ? regResult.userMessage
+              : 'Could not create the room. Try again.';
+        });
+      }
+      return;
+    }
+
+    setState(() {
+      _roomCode = code;
+      _phase = TransferUiPhase.listening;
+      _statusMessage = 'Ready to receive files';
     });
   }
 
