@@ -8,6 +8,7 @@ import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration, progressPercent } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
 import { createTransferMetrics, updateTransferMetrics, TransferMetricsState } from "../utils/transferMetrics";
+import { lookupRoomWithGracePeriod, roomLookupMessage } from "../utils/relayUrl";
 import { useSettings } from "../context/SettingsContext";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
@@ -26,13 +27,13 @@ const logToConsole = (log: LogEvent) => {
 const STATE_LABELS: Record<string, string> = {
   Discovering: "Searching...",
   Listening: "Ready to receive files",
-  Connecting: "Connecting to device...",
-  SignalingConnected: "Connecting to device...",
-  NegotiatingIce: "Establishing connection...",
-  Connected: "Connected to device...",
+  Connecting: "Establishing secure connection…",
+  SignalingConnected: "Establishing secure connection…",
+  NegotiatingIce: "Establishing secure connection…",
+  Connected: "Establishing secure connection…",
 };
 
-const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Connecting to device...";
+const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Establishing secure connection…";
 
 const SendPage: React.FC = () => {
   const { settings } = useSettings();
@@ -362,7 +363,7 @@ const SendPage: React.FC = () => {
     }
     if (isConnectingRemote || isTransferActive) return;
 
-    setTransferStatus("Connecting to relay...");
+    setTransferStatus("Finding room…");
     terminalEventRef.current = false;
     setPhase("connecting");
     setIsConnectingRemote(true);
@@ -376,10 +377,11 @@ const SendPage: React.FC = () => {
         peerId: myPeerId,
       });
       if (turn) iceServers.push(turn);
-      const roomResponse = await fetch(`${RELAY_SERVER_URL.replace(/\/$/, "")}/room/${encodeURIComponent(roomCode)}`);
-      if (!roomResponse.ok) {
-        throw new Error("Room not found. Ask the receiver to open Internet mode and share a new room code.");
+      const lookup = await lookupRoomWithGracePeriod(RELAY_SERVER_URL, roomCode, undefined, 4000, 500);
+      if (lookup.status !== "exists") {
+        throw new Error(roomLookupMessage(lookup));
       }
+      setTransferStatus("Room found. Connecting…");
       const req: SendRemoteRequest = {
         file_path: selectedPath!,
         relay_server_url: RELAY_SERVER_URL,
@@ -398,7 +400,7 @@ const SendPage: React.FC = () => {
       if (!terminalEventRef.current) {
         terminalEventRef.current = true;
         setPhase("failed");
-        setTransferStatus("Error: " + err);
+        setTransferStatus(err instanceof Error ? err.message : "Error: " + err);
       }
       setProgress(null);
     } finally {
@@ -524,8 +526,8 @@ const SendPage: React.FC = () => {
             />
             <button
               onClick={handleRoomCodeConnect}
-              disabled={isConnectingRemote}
-              style={{ padding: "10px 20px", borderRadius: "8px", border: "none", backgroundColor: "var(--accent-primary)", color: "white", fontWeight: 600, cursor: isConnectingRemote ? "default" : "pointer", opacity: isConnectingRemote ? 0.6 : 1 }}
+              disabled={isConnectingRemote || isTransferActive}
+              style={{ padding: "10px 20px", borderRadius: "8px", border: "none", backgroundColor: "var(--accent-primary)", color: "white", fontWeight: 600, cursor: (isConnectingRemote || isTransferActive) ? "default" : "pointer", opacity: (isConnectingRemote || isTransferActive) ? 0.6 : 1 }}
             >
               Connect
             </button>

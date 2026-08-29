@@ -10,6 +10,7 @@ import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration, progressPercent } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
 import { createTransferMetrics, updateTransferMetrics, TransferMetricsState } from "../utils/transferMetrics";
+import { waitForRoomRegistration, roomLookupMessage } from "../utils/relayUrl";
 import TransferAcceptDialog, { IncomingTransfer } from "../components/TransferAcceptDialog";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
@@ -387,10 +388,11 @@ const ReceivePage: React.FC = () => {
   useEffect(() => {
     if (mode !== "internet") return;
 
-    setStatus("Generating room code...");
-    setPhase("listening");
+    setStatus("Creating secure room...");
+    setPhase("connecting");
     setRoomCode(null);
     let cancelled = false;
+    const abortController = new AbortController();
     let unlisten: UnlistenFn | undefined;
     const prior = teardownRef.current;
     let markDone: () => void = () => {};
@@ -420,9 +422,6 @@ const ReceivePage: React.FC = () => {
       ]);
 
       if (cancelled) return;
-      setRoomCode(code);
-
-      setStatus("Waiting for sender...");
 
       const downloadsPath = await downloadDir();
       outputDirRef.current = downloadsPath;
@@ -447,8 +446,39 @@ const ReceivePage: React.FC = () => {
         options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
       };
 
+      if (cancelled) return;
+
+      const receivePromise = invoke<TransferSummary>("receive_file_remote_command", { request: req });
+
+      const regResult = await waitForRoomRegistration(
+        RELAY_SERVER_URL,
+        code,
+        abortController.signal,
+        10_000
+      );
+
+      if (cancelled) {
+        invoke("cancel_session_command", { sessionId: code }).catch(console.error);
+        return;
+      }
+
+      if (regResult.status !== "exists") {
+        await invoke("cancel_session_command", { sessionId: code }).catch(console.error);
+        if (!cancelled && !terminalEventRef.current) {
+          terminalEventRef.current = true;
+          setPhase("failed");
+          const errorMsg = roomLookupMessage(regResult);
+          setStatus(errorMsg || "Could not create the room. Try again.");
+        }
+        return;
+      }
+
+      setRoomCode(code);
+      setPhase("listening");
+      setStatus("Ready to receive files");
+
       try {
-        const result = await invoke<TransferSummary>("receive_file_remote_command", { request: req });
+        const result = await receivePromise;
         void result;
       } catch (err) {
         if (!cancelled && !terminalEventRef.current) {
@@ -463,6 +493,7 @@ const ReceivePage: React.FC = () => {
 
     return () => {
       cancelled = true;
+      abortController.abort();
       if (successResetRef.current) clearTimeout(successResetRef.current);
       // Abandon this session so a trailing event with same id can't hit the next mode.
       abandonSession(activeSessionRef, sessionFloorRef);
