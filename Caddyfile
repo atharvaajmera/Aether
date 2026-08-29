@@ -5,6 +5,20 @@
 }
 
 {$CADDY_DOMAIN} {
+	# Global CORS headers for Desktop (Tauri webview) and Web clients
+	header {
+		Access-Control-Allow-Origin *
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Allow-Headers "*"
+	}
+
+	@options {
+		method OPTIONS
+	}
+	handle @options {
+		respond 204
+	}
+
 	# Route only the relay API surface to relay-server. `handle` blocks are
 	# mutually exclusive and ordered, so the bare `handle` below acts as a
 	# catch-all fallback. (A bare `respond 404` cannot be used for this: the
@@ -17,6 +31,9 @@
 		reverse_proxy relay-server:8080
 	}
 	handle /healthz {
+		reverse_proxy relay-server:8080
+	}
+	handle /room/* {
 		reverse_proxy relay-server:8080
 	}
 
