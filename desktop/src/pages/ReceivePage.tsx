@@ -562,7 +562,7 @@ const ReceivePage: React.FC = () => {
         )}
 
         {mode === "local" && pin && (
-          <div style={{ marginTop: "16px", padding: "12px 24px", backgroundColor: "var(--bg-card)", borderRadius: "8px", border: "1px dashed var(--accent-primary)", display: "flex", flexDirection: "column", alignItems: "center" }}>
+          <div style={{ marginTop: "16px", padding: "12px 24px", backgroundColor: "var(--bg-card)", borderRadius: "8px", border: "1px solid var(--accent-primary)", display: "flex", flexDirection: "column", alignItems: "center" }}>
             <div style={{ fontSize: "12px", color: "var(--text-secondary)", textAlign: "center", marginBottom: "4px" }}>PIN Required</div>
             <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
               <div style={{ fontSize: "24px", fontWeight: "bold", color: "var(--accent-primary)", letterSpacing: "4px" }}>{pin}</div>
@@ -574,7 +574,7 @@ const ReceivePage: React.FC = () => {
         )}
 
         {mode === "internet" && roomCode && (
-          <div style={{ marginTop: "16px", padding: "12px 24px", backgroundColor: "var(--bg-card)", borderRadius: "8px", border: "1px dashed var(--accent-primary)", display: "flex", flexDirection: "column", alignItems: "center" }}>
+          <div style={{ marginTop: "16px", padding: "12px 24px", backgroundColor: "var(--bg-card)", borderRadius: "8px", border: "1px solid var(--accent-primary)", display: "flex", flexDirection: "column", alignItems: "center" }}>
             <div style={{ fontSize: "12px", color: "var(--text-secondary)", textAlign: "center", marginBottom: "4px" }}>Room Code</div>
             <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
               <div style={{ fontSize: "24px", fontWeight: "bold", color: "var(--accent-primary)", letterSpacing: "4px" }}>{roomCode}</div>

@@ -231,6 +231,8 @@ const SendPage: React.FC = () => {
                timestamp: new Date().toISOString(),
              });
              setSendSuccess(true);
+             setRoomCodeInput("");
+             setPinInput("");
              setTransferStatus(
                summary.elapsed_ms != null
                  ? (resumedBytes > 0
@@ -439,6 +441,8 @@ const SendPage: React.FC = () => {
     setIsTransferActive(false);
     setIsConnectingRemote(false);
     setPinInputPeer(null);
+    setPinInput("");
+    setRoomCodeInput("");
     metricsRef.current = null;
     terminalEventRef.current = false;
   };

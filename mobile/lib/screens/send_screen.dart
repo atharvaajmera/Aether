@@ -103,6 +103,7 @@ class _SendScreenState extends State<SendScreen> {
 
   void _resetTransferUi() {
     _autoResetTimer?.cancel();
+    _roomCodeController.clear();
     setState(() {
       _phase = TransferUiPhase.idle;
       _terminalEventReceived = false;
@@ -377,6 +378,7 @@ class _SendScreenState extends State<SendScreen> {
           'mode': summary['mode'],
           'timestamp': DateTime.now().toIso8601String(),
         });
+        _roomCodeController.clear();
         setState(() {
           _phase = TransferUiPhase.succeeded;
           _transferStatus = elapsedMs != null
