@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "plenum",
  "serde",
@@ -2995,7 +2995,7 @@ dependencies = [
 
 [[package]]
 name = "mobile_rust"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "flutter_rust_bridge",
@@ -3693,7 +3693,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "plenum"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -4192,7 +4192,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
