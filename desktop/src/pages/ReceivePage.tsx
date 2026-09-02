@@ -4,6 +4,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { downloadDir } from "@tauri-apps/api/path";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Copy, Check, Wifi, Globe, FolderOpen, CheckCircle2 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import { PlenumEventEnvelope, TransferEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary, IceServer, TransferUiPhase } from "../types/rust";
 import { useSettings } from "../context/SettingsContext";
 import { addHistoryEntry } from "../services/history";
@@ -11,6 +12,7 @@ import { formatBytes, formatDuration, progressPercent } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
 import { createTransferMetrics, updateTransferMetrics, TransferMetricsState } from "../utils/transferMetrics";
 import { waitForRoomRegistration, roomLookupMessage } from "../utils/relayUrl";
+import { encodeRoomQr, encodePinQr } from "../utils/qrPayload";
 import TransferAcceptDialog, { IncomingTransfer } from "../components/TransferAcceptDialog";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
@@ -562,25 +564,35 @@ const ReceivePage: React.FC = () => {
         )}
 
         {mode === "local" && pin && (
-          <div style={{ marginTop: "16px", padding: "12px 24px", backgroundColor: "var(--bg-card)", borderRadius: "8px", border: "1px solid var(--accent-primary)", display: "flex", flexDirection: "column", alignItems: "center" }}>
-            <div style={{ fontSize: "12px", color: "var(--text-secondary)", textAlign: "center", marginBottom: "4px" }}>PIN Required</div>
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              <div style={{ fontSize: "24px", fontWeight: "bold", color: "var(--accent-primary)", letterSpacing: "4px" }}>{pin}</div>
-              <div onClick={handleCopyPin} style={{ cursor: "pointer", padding: "4px", backgroundColor: "var(--bg-sidebar)", borderRadius: "4px" }}>
-                {copied ? <Check size={16} color="var(--accent-primary)" /> : <Copy size={16} color="var(--text-secondary)" />}
+          <div style={{ marginTop: "16px", padding: "14px 20px", backgroundColor: "var(--bg-card)", borderRadius: "12px", border: "1px solid var(--accent-primary)", display: "flex", alignItems: "center", gap: "20px" }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+              <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginBottom: "4px" }}>PIN Required</div>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <div style={{ fontSize: "28px", fontWeight: "bold", color: "var(--accent-primary)", letterSpacing: "4px" }}>{pin}</div>
+                <div onClick={handleCopyPin} style={{ cursor: "pointer", padding: "6px", backgroundColor: "var(--bg-sidebar)", borderRadius: "6px" }} title="Copy PIN">
+                  {copied ? <Check size={16} color="var(--accent-primary)" /> : <Copy size={16} color="var(--text-secondary)" />}
+                </div>
               </div>
+            </div>
+            <div style={{ padding: "6px", backgroundColor: "var(--bg-sidebar)", borderRadius: "8px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <QRCodeSVG value={encodePinQr(pin)} size={72} fgColor="var(--accent-primary)" bgColor="transparent" />
             </div>
           </div>
         )}
 
         {mode === "internet" && roomCode && (
-          <div style={{ marginTop: "16px", padding: "12px 24px", backgroundColor: "var(--bg-card)", borderRadius: "8px", border: "1px solid var(--accent-primary)", display: "flex", flexDirection: "column", alignItems: "center" }}>
-            <div style={{ fontSize: "12px", color: "var(--text-secondary)", textAlign: "center", marginBottom: "4px" }}>Room Code</div>
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              <div style={{ fontSize: "24px", fontWeight: "bold", color: "var(--accent-primary)", letterSpacing: "4px" }}>{roomCode}</div>
-              <div onClick={handleCopyRoomCode} style={{ cursor: "pointer", padding: "4px", backgroundColor: "var(--bg-sidebar)", borderRadius: "4px" }}>
-                {roomCodeCopied ? <Check size={16} color="var(--accent-primary)" /> : <Copy size={16} color="var(--text-secondary)" />}
+          <div style={{ marginTop: "16px", padding: "14px 20px", backgroundColor: "var(--bg-card)", borderRadius: "12px", border: "1px solid var(--accent-primary)", display: "flex", alignItems: "center", gap: "20px" }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+              <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginBottom: "4px" }}>Room Code</div>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <div style={{ fontSize: "28px", fontWeight: "bold", color: "var(--accent-primary)", letterSpacing: "4px" }}>{roomCode}</div>
+                <div onClick={handleCopyRoomCode} style={{ cursor: "pointer", padding: "6px", backgroundColor: "var(--bg-sidebar)", borderRadius: "6px" }} title="Copy Room Code">
+                  {roomCodeCopied ? <Check size={16} color="var(--accent-primary)" /> : <Copy size={16} color="var(--text-secondary)" />}
+                </div>
               </div>
+            </div>
+            <div style={{ padding: "6px", backgroundColor: "var(--bg-sidebar)", borderRadius: "8px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <QRCodeSVG value={encodeRoomQr(roomCode)} size={72} fgColor="var(--accent-primary)" bgColor="transparent" />
             </div>
           </div>
         )}
